@@ -51,7 +51,6 @@ jobs:
 
       - name: Verify Remote
         run: |
-          # Use manual_url if provided, otherwise default to GDrive - rotatos210 for auto-runs
           REMOTE="${{ github.event.inputs.rclone_remote }}"
           if [ -z "$REMOTE" ]; then REMOTE="GDrive - rotatos210"; fi
           
@@ -81,32 +80,45 @@ jobs:
           UPLOAD_PATH="${{ github.event.inputs.upload_path }}"
           if [ -z "$UPLOAD_PATH" ]; then UPLOAD_PATH="/"; fi
           
+          # Create a clean download directory
+          mkdir -p downloads_temp
+          
           while IFS= read -r URL; do
             echo "--- Processing: $URL ---"
-            FILENAME=$(basename "$URL" | cut -d'?' -f1)
             
-            # If filename looks weird or is empty, use a timestamped name
-            if [[ -z "$FILENAME" || "$FILENAME" == "/" ]]; then
-               FILENAME="file_$(date +%s)"
-            fi
-
-            echo "Step 1: Downloading $FILENAME..."
-            if ! aria2c -x 16 -s 16 -o "$FILENAME" "$URL" --summary-interval=10 --console-log-level=warn; then
+            # Clear the temp folder for each download
+            rm -rf downloads_temp/*
+            
+            echo "Step 1: Downloading..."
+            # We don't use -o here. 
+            # aria2c will automatically detect the name from the server (Content-Disposition)
+            if ! aria2c -x 16 -s 16 -d "downloads_temp" "$URL" --summary-interval=10 --console-log-level=warn; then
               echo "::error::Download failed!"
               continue
             fi
             
+            # Identify the file that was just downloaded
+            FILENAME=$(ls downloads_temp/ | head -n 1)
+            
+            if [ -z "$FILENAME" ]; then
+                echo "::error::No file found after download!"
+                continue
+            fi
+
+            echo "Detected Filename: $FILENAME"
+            
             echo "Step 2: Uploading $FILENAME to $REMOTE..."
-            if ! rclone copy -P --stats 10s "$FILENAME" "$REMOTE:$UPLOAD_PATH"; then
+            if ! rclone move -P --stats 10s "downloads_temp/$FILENAME" "$REMOTE:$UPLOAD_PATH"; then
               echo "::error::Upload failed. Retrying with verbose logs..."
-              rclone copy -vv "$FILENAME" "$REMOTE:$UPLOAD_PATH"
+              rclone move -vv "downloads_temp/$FILENAME" "$REMOTE:$UPLOAD_PATH"
             else
               echo "✅ Successfully uploaded $FILENAME"
             fi
             
-            rm -f "$FILENAME"
           done < processed_links.txt
 
       - name: Cleanup
         if: always()
-        run: rm -f ~/.config/rclone/rclone.conf processed_links.txt
+        run: |
+          rm -rf downloads_temp
+          rm -f ~/.config/rclone/rclone.conf processed_links.txt
