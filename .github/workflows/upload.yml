@@ -11,9 +11,9 @@ on:
         required: false
         default: ''
       rclone_remote:
-        description: 'Remote Name (e.g., GDrive Ben, Mega - Ben, Dropbox - Zegroh)'
+        description: 'Remote Name (e.g., GDrive - rotatos210, GDrive Ben, Mega - Ben)'
         required: true
-        default: 'GDrive Ben'
+        default: 'GDrive - rotatos210'
       upload_path:
         description: 'Destination path (e.g., /Downloads/)'
         required: false
@@ -51,9 +51,9 @@ jobs:
 
       - name: Verify Remote
         run: |
-          # Use manual_url if provided, otherwise default to GDrive Ben for auto-runs
+          # Use manual_url if provided, otherwise default to GDrive - rotatos210 for auto-runs
           REMOTE="${{ github.event.inputs.rclone_remote }}"
-          if [ -z "$REMOTE" ]; then REMOTE="GDrive Ben"; fi
+          if [ -z "$REMOTE" ]; then REMOTE="GDrive - rotatos210"; fi
           
           echo "Testing connection to: $REMOTE"
           if ! rclone lsd "$REMOTE:" --max-depth 1; then
@@ -77,7 +77,7 @@ jobs:
       - name: Transfer Files
         run: |
           REMOTE="${{ github.event.inputs.rclone_remote }}"
-          if [ -z "$REMOTE" ]; then REMOTE="GDrive Ben"; fi
+          if [ -z "$REMOTE" ]; then REMOTE="GDrive - rotatos210"; fi
           UPLOAD_PATH="${{ github.event.inputs.upload_path }}"
           if [ -z "$UPLOAD_PATH" ]; then UPLOAD_PATH="/"; fi
           
