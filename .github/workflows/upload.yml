@@ -89,8 +89,9 @@ jobs:
                 count=$((count+1))
                 
                 if [ $count -gt 3 ]; then
-                  # Parse Speed and Total Size
+                  # Parse Progress, Speed, and Total Size
                   LOG_TAIL=$(tail -n 10 download_log.txt)
+                  PROGRESS=$(echo "$LOG_TAIL" | grep -o '([0-9]*%)' | tail -n 1 | tr -d '()')
                   SPEED_RAW=$(echo "$LOG_TAIL" | grep -o 'DL:[0-9.]*[A-Za-z]*' | tail -n 1 | cut -d: -f2)
                   SIZE_RAW=$(echo "$LOG_TAIL" | grep -o '/[0-9.]*[A-Za-z]*' | tail -n 1 | tr -d '/')
                   
@@ -103,7 +104,7 @@ jobs:
                   if [[ $SIZE_RAW == *GiB ]]; then SIZE_MB=$(echo ${SIZE_RAW%GiB} | awk '{print $1 * 1024}'); fi
                   if [[ $SIZE_RAW == *MiB ]]; then SIZE_MB=$(echo ${SIZE_RAW%MiB} | awk '{print $1 * 1}'); fi
 
-                  echo "Current Status: Speed=$SPEED_RAW | Size=$SIZE_RAW"
+                  echo "📊 Progress: ${PROGRESS:-0%} | Speed: ${SPEED_RAW:-0} | Size: ${SIZE_RAW:-0}"
 
                   # KILL LOGIC: If Size > 1GB (1024MB) AND Speed < 1MB/s (1024KB/s)
                   if (( $(echo "$SIZE_MB > 1024" | bc -l) )) && (( $(echo "$SPEED_KB < 1024" | bc -l) )); then
