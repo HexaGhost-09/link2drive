@@ -7,15 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       manual_url:
-        description: 'Single direct link (Overrides urls.txt)'
+        description: 'Direct Link or Magnet/Torrent'
         required: false
         default: ''
       rclone_remote:
-        description: 'Remote Name (e.g., GDrive - rotatos210, GDrive Ben, Mega - Ben)'
+        description: 'Remote Name'
         required: true
         default: 'GDrive - rotatos210'
       upload_path:
-        description: 'Destination path (e.g., /Downloads/)'
+        description: 'Destination path'
         required: false
         default: '/'
 
@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo -v ; curl https://rclone.org/install.sh | sudo bash
-          sudo apt-get install -y aria2
+          sudo apt-get install -y aria2 bc
           
           echo "Tool Versions:"
           aria2c --version | head -n 1
@@ -45,19 +45,7 @@ jobs:
             exit 1
           fi
           echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
-          echo "✅ Rclone configured."
-          echo "--- Available Remotes ---"
           rclone listremotes
-
-      - name: Verify Remote
-        run: |
-          REMOTE="${{ github.event.inputs.rclone_remote }}"
-          if [ -z "$REMOTE" ]; then REMOTE="GDrive - rotatos210"; fi
-          
-          echo "Testing connection to: $REMOTE"
-          if ! rclone lsd "$REMOTE:" --max-depth 1; then
-            echo "::warning::Check if '$REMOTE' supports listing. If not, this is normal."
-          fi
 
       - name: Prepare Links
         id: prep
@@ -80,45 +68,68 @@ jobs:
           UPLOAD_PATH="${{ github.event.inputs.upload_path }}"
           if [ -z "$UPLOAD_PATH" ]; then UPLOAD_PATH="/"; fi
           
-          # Create a clean download directory
           mkdir -p downloads_temp
           
           while IFS= read -r URL; do
             echo "--- Processing: $URL ---"
-            
-            # Clear the temp folder for each download
             rm -rf downloads_temp/*
             
-            echo "Step 1: Downloading..."
-            # We don't use -o here. 
-            # aria2c will automatically detect the name from the server (Content-Disposition)
-            if ! aria2c -x 16 -s 16 -d "downloads_temp" "$URL" --summary-interval=10 --console-log-level=warn; then
-              echo "::error::Download failed!"
-              continue
-            fi
-            
-            # Identify the file that was just downloaded
-            FILENAME=$(ls downloads_temp/ | head -n 1)
-            
-            if [ -z "$FILENAME" ]; then
-                echo "::error::No file found after download!"
-                continue
-            fi
+            # Detect Torrent/Magnet
+            if [[ "$URL" == magnet:* ]] || [[ "$URL" == *.torrent* ]]; then
+              echo "✅ Torrent/Magnet Detected. Starting Monitoring..."
+              
+              # Run aria2c in background
+              aria2c --seed-time=0 -d "downloads_temp" "$URL" --summary-interval=5 --console-log-level=warn > download_log.txt 2>&1 &
+              PID=$!
+              
+              # Monitor Loop (Check every 10s after initial 30s)
+              count=0
+              while kill -0 $PID 2>/dev/null; do
+                sleep 10
+                count=$((count+1))
+                
+                if [ $count -gt 3 ]; then
+                  # Parse Speed and Total Size
+                  LOG_TAIL=$(tail -n 10 download_log.txt)
+                  SPEED_RAW=$(echo "$LOG_TAIL" | grep -o 'DL:[0-9.]*[A-Za-z]*' | tail -n 1 | cut -d: -f2)
+                  SIZE_RAW=$(echo "$LOG_TAIL" | grep -o '/[0-9.]*[A-Za-z]*' | tail -n 1 | tr -d '/')
+                  
+                  # Conversion Logic
+                  SPEED_KB=0
+                  if [[ $SPEED_RAW == *MiB ]]; then SPEED_KB=$(echo ${SPEED_RAW%MiB} | awk '{print $1 * 1024}'); fi
+                  if [[ $SPEED_RAW == *KiB ]]; then SPEED_KB=$(echo ${SPEED_RAW%KiB} | awk '{print $1 * 1}'); fi
+                  
+                  SIZE_MB=0
+                  if [[ $SIZE_RAW == *GiB ]]; then SIZE_MB=$(echo ${SIZE_RAW%GiB} | awk '{print $1 * 1024}'); fi
+                  if [[ $SIZE_RAW == *MiB ]]; then SIZE_MB=$(echo ${SIZE_RAW%MiB} | awk '{print $1 * 1}'); fi
 
-            echo "Detected Filename: $FILENAME"
-            
-            echo "Step 2: Uploading $FILENAME to $REMOTE..."
-            if ! rclone move -P --stats 10s "downloads_temp/$FILENAME" "$REMOTE:$UPLOAD_PATH"; then
-              echo "::error::Upload failed. Retrying with verbose logs..."
-              rclone move -vv "downloads_temp/$FILENAME" "$REMOTE:$UPLOAD_PATH"
+                  echo "Current Status: Speed=$SPEED_RAW | Size=$SIZE_RAW"
+
+                  # KILL LOGIC: If Size > 1GB (1024MB) AND Speed < 1MB/s (1024KB/s)
+                  if (( $(echo "$SIZE_MB > 1024" | bc -l) )) && (( $(echo "$SPEED_KB < 1024" | bc -l) )); then
+                    echo "::warning::Torrent too slow (<1MB/s) for a large file (>1GB). Terminating."
+                    kill $PID
+                    break
+                  fi
+                fi
+              done
+              wait $PID || true
             else
-              echo "✅ Successfully uploaded $FILENAME"
+              # Direct Link
+              aria2c -x 16 -s 16 -d "downloads_temp" "$URL" --summary-interval=10 --console-log-level=warn
+            fi
+            
+            # Upload
+            FILENAME=$(ls downloads_temp/ | head -n 1)
+            if [ ! -z "$FILENAME" ]; then
+              echo "Uploading $FILENAME..."
+              rclone move -P --stats 10s "downloads_temp/$FILENAME" "$REMOTE:$UPLOAD_PATH"
+            else
+              echo "::error::No file found to upload."
             fi
             
           done < processed_links.txt
 
       - name: Cleanup
         if: always()
-        run: |
-          rm -rf downloads_temp
-          rm -f ~/.config/rclone/rclone.conf processed_links.txt
+        run: rm -rf downloads_temp download_log.txt ~/.config/rclone/rclone.conf processed_links.txt
