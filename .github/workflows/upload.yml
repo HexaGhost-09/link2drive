@@ -1,0 +1,98 @@
+name: Download & Upload (Multi-Remote)
+
+on:
+  workflow_dispatch:
+    inputs:
+      manual_url:
+        description: 'Single direct link (Overrides urls.txt)'
+        required: false
+        default: ''
+      rclone_remote:
+        description: 'Remote Name (e.g., GDrive Ben, Mega - Ben, Dropbox - Zegroh)'
+        required: true
+        default: 'GDrive Ben'
+      upload_path:
+        description: 'Destination path (e.g., /Downloads/)'
+        required: false
+        default: '/'
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 rclone
+          aria2c --version | head -n 1
+          rclone --version
+
+      - name: Configure Rclone
+        run: |
+          mkdir -p ~/.config/rclone/
+          if [ -z "${{ secrets.RCLONE_CONFIG }}" ]; then
+            echo "::error::RCLONE_CONFIG secret is missing!"
+            exit 1
+          fi
+          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          echo "✅ Rclone configured."
+          echo "--- Available Remotes ---"
+          rclone listremotes
+
+      - name: Verify Remote
+        run: |
+          REMOTE="${{ github.event.inputs.rclone_remote }}"
+          echo "Testing connection to: $REMOTE"
+          # Try to list the root of the remote to see if it works
+          if ! rclone lsd "$REMOTE:" --max-depth 1; then
+            echo "::warning::Could not list directories on '$REMOTE'. This might be fine if the remote is empty or doesn't support listing, but check your config if it fails later."
+          fi
+
+      - name: Prepare Links
+        id: prep
+        run: |
+          if [ ! -z "${{ github.event.inputs.manual_url }}" ]; then
+            echo "${{ github.event.inputs.manual_url }}" > processed_links.txt
+          elif [ -f "urls.txt" ]; then
+            grep -v '^#' urls.txt | grep -v '^$' > processed_links.txt || true
+          fi
+          
+          if [ ! -s processed_links.txt ]; then
+            echo "::error::No links found to process!"
+            exit 1
+          fi
+
+      - name: Transfer Files
+        run: |
+          REMOTE="${{ github.event.inputs.rclone_remote }}"
+          UPLOAD_PATH="${{ github.event.inputs.upload_path }}"
+          
+          while IFS= read -r URL; do
+            echo "--- Processing: $URL ---"
+            FILENAME=$(basename "$URL" | cut -d'?' -f1)
+            
+            echo "Downloading..."
+            if ! aria2c -x 16 -s 16 -o "$FILENAME" "$URL" --console-log-level=error; then
+              echo "::error::Download failed for $URL"
+              continue
+            fi
+            
+            echo "Uploading $FILENAME to $REMOTE..."
+            # Using -P for progress and -vv for detailed logs on failure
+            if ! rclone copy -P "$FILENAME" "$REMOTE:$UPLOAD_PATH"; then
+              echo "::error::Upload failed. Retrying with verbose logs..."
+              rclone copy -vv "$FILENAME" "$REMOTE:$UPLOAD_PATH"
+            else
+              echo "✅ Successfully uploaded $FILENAME"
+            fi
+            
+            rm -f "$FILENAME"
+          done < processed_links.txt
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.config/rclone/rclone.conf processed_links.txt
