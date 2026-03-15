@@ -24,12 +24,16 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Tools
+      - name: Install Latest Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 rclone
+          # Use official rclone install script for absolute latest version
+          sudo -v ; curl https://rclone.org/install.sh | sudo bash
+          sudo apt-get install -y aria2
+          
+          echo "Tool Versions:"
           aria2c --version | head -n 1
-          rclone --version
+          rclone version
 
       - name: Configure Rclone
         run: |
@@ -47,9 +51,8 @@ jobs:
         run: |
           REMOTE="${{ github.event.inputs.rclone_remote }}"
           echo "Testing connection to: $REMOTE"
-          # Try to list the root of the remote to see if it works
           if ! rclone lsd "$REMOTE:" --max-depth 1; then
-            echo "::warning::Could not list directories on '$REMOTE'. This might be fine if the remote is empty or doesn't support listing, but check your config if it fails later."
+            echo "::warning::Check if '$REMOTE' supports listing. If not, this is normal."
           fi
 
       - name: Prepare Links
@@ -62,7 +65,7 @@ jobs:
           fi
           
           if [ ! -s processed_links.txt ]; then
-            echo "::error::No links found to process!"
+            echo "::error::No links found!"
             exit 1
           fi
 
@@ -75,15 +78,16 @@ jobs:
             echo "--- Processing: $URL ---"
             FILENAME=$(basename "$URL" | cut -d'?' -f1)
             
-            echo "Downloading..."
-            if ! aria2c -x 16 -s 16 -o "$FILENAME" "$URL" --console-log-level=error; then
-              echo "::error::Download failed for $URL"
+            echo "Step 1: Downloading $FILENAME..."
+            # aria2c showing progress every 10 seconds
+            if ! aria2c -x 16 -s 16 -o "$FILENAME" "$URL" --summary-interval=10; then
+              echo "::error::Download failed!"
               continue
             fi
             
-            echo "Uploading $FILENAME to $REMOTE..."
-            # Using -P for progress and -vv for detailed logs on failure
-            if ! rclone copy -P "$FILENAME" "$REMOTE:$UPLOAD_PATH"; then
+            echo "Step 2: Uploading $FILENAME to $REMOTE..."
+            # rclone showing progress every 10 seconds with --stats 10s
+            if ! rclone copy -P --stats 10s "$FILENAME" "$REMOTE:$UPLOAD_PATH"; then
               echo "::error::Upload failed. Retrying with verbose logs..."
               rclone copy -vv "$FILENAME" "$REMOTE:$UPLOAD_PATH"
             else
