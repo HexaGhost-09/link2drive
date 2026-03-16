@@ -8,6 +8,9 @@ All notable changes to the **Link2Drive** project will be documented in this fil
 - **Auto-Zipping**: Automatically packs multiple files or folders into a single `.zip` archive before uploading. This keeps your cloud storage organized and ensures no files are missed from complex torrents.
 - **Smart Archive Naming**: Zip files are named based on the content to make them easy to find.
 
+### ⚙️ Changed
+- **Default Remote**: Set `drime` as the default rclone destination for both automatic and manual runs.
+
 ## [2.0.0] - 2026-03-15
 
 ### 🚀 Added
