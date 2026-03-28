@@ -41,13 +41,15 @@ jobs:
           apkmd --version
 
       - name: Configure Rclone
+        env:
+          RCLONE_CONF_SECRET: ${{ secrets.RCLONE_CONFIG }}
         run: |
           mkdir -p ~/.config/rclone/
-          if [ -z "${{ secrets.RCLONE_CONFIG }}" ]; then
+          if [ -z "$RCLONE_CONF_SECRET" ]; then
             echo "::error::RCLONE_CONFIG secret is missing!"
             exit 1
           fi
-          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          echo "$RCLONE_CONF_SECRET" > ~/.config/rclone/rclone.conf
           rclone listremotes
 
       - name: Prepare Links
