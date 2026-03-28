@@ -31,12 +31,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo -v ; curl https://rclone.org/install.sh | sudo bash
-          sudo apt-get install -y aria2 bc zip
+          sudo apt-get install -y aria2 bc zip nodejs npm
+          # Install the specific tool for APKMirror
+          sudo npm install -g apkmirror-downloader
           
           echo "Tool Versions:"
           aria2c --version | head -n 1
           rclone version
-          zip --version | head -n 1
+          apkmd --version
 
       - name: Configure Rclone
         run: |
@@ -75,8 +77,16 @@ jobs:
             echo "--- Processing: $URL ---"
             rm -rf downloads_temp/*
             
-            # Detect Torrent/Magnet
-            if [[ "$URL" == magnet:* ]] || [[ "$URL" == *.torrent* ]]; then
+            if [[ "$URL" == *"apkmirror.com"* ]]; then
+              echo "🤖 APKMirror detected. Using bypass tool..."
+              # Extract organization and repository names from the URL
+              ORG=$(echo "$URL" | awk -F'/' '{print $5}')
+              REPO=$(echo "$URL" | awk -F'/' '{print $6}')
+              
+              # Download using the specialized tool
+              apkmd --org "$ORG" --repo "$REPO" --outDir "downloads_temp"
+            
+            elif [[ "$URL" == magnet:* ]] || [[ "$URL" == *.torrent* ]]; then
               echo "✅ Torrent/Magnet Detected. Starting Monitoring..."
               aria2c --seed-time=0 -d "downloads_temp" "$URL" --summary-interval=5 --console-log-level=warn > download_log.txt 2>&1 &
               PID=$!
