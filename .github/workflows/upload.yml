@@ -11,7 +11,7 @@ on:
         required: false
         default: ''
       rclone_remote:
-        description: 'Remote Name'
+        description: 'Remote Name (e.g., drime, gdrive)'
         required: true
         default: 'drime'
       upload_path:
@@ -38,19 +38,18 @@ jobs:
           echo "Tool Versions:"
           aria2c --version | head -n 1
           rclone version
-          apkmd --version
 
       - name: Configure Rclone
-        env:
-          RCLONE_CONF_SECRET: ${{ secrets.RCLONE_CONFIG }}
         run: |
           mkdir -p ~/.config/rclone/
-          if [ -z "$RCLONE_CONF_SECRET" ]; then
-            echo "::error::RCLONE_CONFIG secret is missing!"
+          if [ -f "rclone.conf" ]; then
+            cp rclone.conf ~/.config/rclone/rclone.conf
+            echo "Loaded rclone.conf from repository."
+          else
+            echo "::error::rclone.conf is missing in the repository!"
             exit 1
           fi
-          echo "$RCLONE_CONF_SECRET" > ~/.config/rclone/rclone.conf
-          rclone listremotes
+          rclone listremotes || true
 
       - name: Prepare Links
         id: prep
@@ -81,55 +80,23 @@ jobs:
             
             if [[ "$URL" == *"apkmirror.com"* ]]; then
               echo "🤖 APKMirror detected. Using bypass tool..."
-              # Extract organization and repository names from the URL
               ORG=$(echo "$URL" | awk -F'/' '{print $5}')
               REPO=$(echo "$URL" | awk -F'/' '{print $6}')
-              
-              # Download using the specialized tool
               apkmd --org "$ORG" --repo "$REPO" --outDir "downloads_temp"
             
             elif [[ "$URL" == magnet:* ]] || [[ "$URL" == *.torrent* ]]; then
-              echo "✅ Torrent/Magnet Detected. Starting Monitoring..."
-              aria2c --seed-time=0 -d "downloads_temp" "$URL" --summary-interval=5 --console-log-level=warn > download_log.txt 2>&1 &
-              PID=$!
-              
-              count=0
-              while kill -0 $PID 2>/dev/null; do
-                sleep 10
-                count=$((count+1))
-                if [ $count -gt 3 ]; then
-                  LOG_TAIL=$(tail -n 10 download_log.txt)
-                  PROGRESS=$(echo "$LOG_TAIL" | grep -o '([0-9]*%)' | tail -n 1 | tr -d '()')
-                  SPEED_RAW=$(echo "$LOG_TAIL" | grep -o 'DL:[0-9.]*[A-Za-z]*' | tail -n 1 | cut -d: -f2)
-                  SIZE_RAW=$(echo "$LOG_TAIL" | grep -o '/[0-9.]*[A-Za-z]*' | tail -n 1 | tr -d '/')
-                  
-                  SPEED_KB=0
-                  if [[ $SPEED_RAW == *MiB ]]; then SPEED_KB=$(echo ${SPEED_RAW%MiB} | awk '{print $1 * 1024}'); fi
-                  if [[ $SPEED_RAW == *KiB ]]; then SPEED_KB=$(echo ${SPEED_RAW%KiB} | awk '{print $1 * 1}'); fi
-                  
-                  SIZE_MB=0
-                  if [[ $SIZE_RAW == *GiB ]]; then SIZE_MB=$(echo ${SIZE_RAW%GiB} | awk '{print $1 * 1024}'); fi
-                  if [[ $SIZE_RAW == *MiB ]]; then SIZE_MB=$(echo ${SIZE_RAW%MiB} | awk '{print $1 * 1}'); fi
-
-                  echo "📊 Progress: ${PROGRESS:-0%} | Speed: ${SPEED_RAW:-0} | Size: ${SIZE_RAW:-0}"
-
-                  if (( $(echo "$SIZE_MB > 1024" | bc -l) )) && (( $(echo "$SPEED_KB < 1024" | bc -l) )); then
-                    echo "::warning::Torrent too slow (<1MB/s) for a large file (>1GB). Terminating."
-                    kill $PID
-                    break
-                  fi
-                fi
-              done
-              wait $PID || true
+              echo "✅ Torrent/Magnet Detected. Starting Download..."
+              # Removed the slow manual bash watch logic in favor of aria2c handling it directly
+              # --seed-time=0 prevents infinite seeding which blocks termination
+              aria2c --seed-time=0 -d "downloads_temp" "$URL" --console-log-level=warn
             else
-              # Direct Link
-              aria2c -x 16 -s 16 -d "downloads_temp" "$URL" --summary-interval=10 --console-log-level=warn
+              echo "✅ Direct Link Detected. Starting Download..."
+              aria2c -x 16 -s 16 -d "downloads_temp" "$URL" --console-log-level=warn
             fi
             
-            # Post-Download Processing (Zipping)
-            ITEM_COUNT=$(ls -1 downloads_temp/ | wc -l)
+            ITEM_COUNT=$(ls -1 downloads_temp/ 2>/dev/null | wc -l || echo 0)
             if [ "$ITEM_COUNT" -eq 0 ]; then
-                echo "::error::No file found to upload."
+                echo "::warning::No file found to upload for URL: $URL"
                 continue
             fi
 
@@ -151,4 +118,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -rf downloads_temp download_log.txt ~/.config/rclone/rclone.conf processed_links.txt
+        run: rm -rf downloads_temp ~/.config/rclone/rclone.conf processed_links.txt
