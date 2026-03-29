@@ -1,0 +1,48 @@
+name: APKMirror Test Download
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install apkmirror-downloader
+
+      - name: Download APK (example: YouTube)
+        run: |
+          node <<EOF
+          const downloader = require("apkmirror-downloader");
+
+          downloader.download({
+            org: "google-inc",
+            repo: "youtube",
+            outDir: "./apk"
+          }).then(() => {
+            console.log("Download complete");
+          }).catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          EOF
+
+      - name: List files (debug)
+        run: ls -R
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apkmirror-apk
+          path: ./apk
