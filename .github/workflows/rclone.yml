@@ -10,7 +10,7 @@ on:
         description: 'Direct Link or Magnet/Torrent'
         required: false
       rclone_remote:
-        description: 'Remote (drime, gdrive, etc.)'
+        description: 'Remote Name (e.g., drime, gdrive)'
         required: true
         default: 'drime'
       upload_path:
@@ -21,8 +21,7 @@ on:
 jobs:
   transfer:
     runs-on: ubuntu-latest
-    # POWER TIP: For maximum speed, build your Dockerfile, 
-    # push it to GitHub Packages (GHCR), and use that image here.
+    # Uses the container environment for consistency
     container: 
       image: ubuntu:22.04 
 
@@ -30,25 +29,25 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # This step is only needed if you haven't pushed your image to a registry yet.
-      # If you use a pre-built image, you can delete this entire step for instant starts.
       - name: Quick Tool Sync
         run: |
-          apt-get update && apt-get install -y curl aria2 zip nodejs npm
+          apt-get update && apt-get install -y curl aria2 bc zip nodejs npm
           curl https://rclone.org/install.sh | bash
           npm install -g apkmirror-downloader
 
       - name: Configure Rclone
         run: |
           mkdir -p ~/.config/rclone/
-          cp rclone.conf ~/.config/rclone/rclone.conf
+          if [ -f "rclone.conf" ]; then
+            cp rclone.conf ~/.config/rclone/rclone.conf
+          fi
 
       - name: Multi-Threaded Transfer
         run: |
           REMOTE="${{ github.event.inputs.rclone_remote || 'drime' }}"
           UPLOAD_PATH="${{ github.event.inputs.upload_path || '/' }}"
           
-          # Prepare links
+          # Prepare links from manual input or urls.txt
           if [ ! -z "${{ github.event.inputs.manual_url }}" ]; then
             echo "${{ github.event.inputs.manual_url }}" > links.txt
           else
@@ -58,32 +57,40 @@ jobs:
           mkdir -p downloads_temp
           
           while IFS= read -r URL; do
+            echo "--- Processing: $URL ---"
             rm -rf downloads_temp/*
             
-            # HIGH-SPEED DOWNLOAD LOGIC
             if [[ "$URL" == *"apkmirror.com"* ]]; then
               ORG=$(echo "$URL" | awk -F'/' '{print $5}')
               REPO=$(echo "$URL" | awk -F'/' '{print $6}')
               apkmd --org "$ORG" --repo "$REPO" --outDir "downloads_temp"
+            
             elif [[ "$URL" == magnet:* ]] || [[ "$URL" == *.torrent* ]]; then
-              # NO SEEDING: Added --seed-ratio=0.0 and aggressive peer discovery
-              aria2c --seed-time=0 --seed-ratio=0.0 --bt-stop-timeout=60 \
-                     --bt-tracker-connect-timeout=10 --bt-tracker-timeout=10 \
-                     -d "downloads_temp" "$URL"
+              echo "🧲 Magnet/Torrent Detected - Killing Seed at 100%"
+              # SEEDING FIX: --seed-ratio=0.0 ensures it stops and uploads immediately
+              aria2c --seed-time=0 --seed-ratio=0.0 --bt-stop-timeout=60 -d "downloads_temp" "$URL"
+            
             else
-              # MULTI-THREADED: 16 connections for max speed
+              echo "🔗 Direct Link Detected - High Speed Mode"
+              # POWER FEATURE: 16 connections for maximum bandwidth usage
               aria2c -x 16 -s 16 -k 1M -d "downloads_temp" "$URL"
             fi
             
-            # ZIP & UPLOAD
             ITEM_COUNT=$(ls -1 downloads_temp/ | wc -l)
             if [ "$ITEM_COUNT" -gt 0 ]; then
-                if [ "$ITEM_COUNT" -gt 1 ]; then
+                # Handle folders or multiple files by zipping
+                if [ "$ITEM_COUNT" -gt 1 ] || [ -d "downloads_temp/$(ls downloads_temp/ | head -n 1)" ]; then
                     FILENAME="bundle_$(date +%s).zip"
                     (cd downloads_temp && zip -r "../$FILENAME" .)
+                    echo "🚀 Uploading ZIP to $REMOTE..."
                     rclone move -P "../$FILENAME" "$REMOTE:$UPLOAD_PATH"
                 else
+                    echo "🚀 Uploading file to $REMOTE..."
                     rclone move -P "downloads_temp/" "$REMOTE:$UPLOAD_PATH"
                 fi
             fi
           done < links.txt
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf downloads_temp links.txt
