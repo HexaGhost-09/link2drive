@@ -1,4 +1,4 @@
-name: Download & Upload (Multi-Remote)
+name: Download & Upload (Docker Optimized)
 
 on:
   push:
@@ -9,7 +9,6 @@ on:
       manual_url:
         description: 'Direct Link or Magnet/Torrent'
         required: false
-        default: ''
       rclone_remote:
         description: 'Remote Name (e.g., drime, gdrive)'
         required: true
@@ -22,100 +21,62 @@ on:
 jobs:
   transfer:
     runs-on: ubuntu-latest
+    # We use a container to ensure all tools are pre-installed and consistent
+    container: 
+      image: ubuntu:22.04 # In a real scenario, you'd use your own image here (e.g., username/link2drive:latest)
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Latest Tools
+      # If using a raw ubuntu image in the 'container' field, we still run a quick setup.
+      # Ideally, you build the Dockerfile above once and reference it here.
+      - name: Setup Environment
         run: |
-          sudo apt-get update
-          sudo -v ; curl https://rclone.org/install.sh | sudo bash
-          sudo apt-get install -y aria2 bc zip nodejs npm
-          # Install the specific tool for APKMirror
-          sudo npm install -g apkmirror-downloader
-          
-          echo "Tool Versions:"
-          aria2c --version | head -n 1
-          rclone version
+          apt-get update && apt-get install -y curl aria2 bc zip nodejs npm
+          curl https://rclone.org/install.sh | bash
+          npm install -g apkmirror-downloader
 
       - name: Configure Rclone
         run: |
           mkdir -p ~/.config/rclone/
-          if [ -f "rclone.conf" ]; then
-            cp rclone.conf ~/.config/rclone/rclone.conf
-            echo "Loaded rclone.conf from repository."
-          else
-            echo "::error::rclone.conf is missing in the repository!"
-            exit 1
-          fi
-          rclone listremotes || true
-
-      - name: Prepare Links
-        id: prep
-        run: |
-          if [ ! -z "${{ github.event.inputs.manual_url }}" ]; then
-            echo "${{ github.event.inputs.manual_url }}" > processed_links.txt
-          elif [ -f "urls.txt" ]; then
-            grep -v '^#' urls.txt | grep -v '^$' > processed_links.txt || true
-          fi
-          
-          if [ ! -s processed_links.txt ]; then
-            echo "::error::No links found!"
-            exit 1
-          fi
+          cp rclone.conf ~/.config/rclone/rclone.conf
 
       - name: Transfer Files
         run: |
-          REMOTE="${{ github.event.inputs.rclone_remote }}"
-          if [ -z "$REMOTE" ]; then REMOTE="drime"; fi
-          UPLOAD_PATH="${{ github.event.inputs.upload_path }}"
-          if [ -z "$UPLOAD_PATH" ]; then UPLOAD_PATH="/"; fi
+          REMOTE="${{ github.event.inputs.rclone_remote || 'drime' }}"
+          UPLOAD_PATH="${{ github.event.inputs.upload_path || '/' }}"
+          
+          # Prepare the links from urls.txt or manual input
+          if [ ! -z "${{ github.event.inputs.manual_url }}" ]; then
+            echo "${{ github.event.inputs.manual_url }}" > links.txt
+          else
+            grep -v '^#' urls.txt | grep -v '^$' > links.txt || true
+          fi
           
           mkdir -p downloads_temp
           
           while IFS= read -r URL; do
-            echo "--- Processing: $URL ---"
             rm -rf downloads_temp/*
             
+            # Using the tools already available in the container
             if [[ "$URL" == *"apkmirror.com"* ]]; then
-              echo "🤖 APKMirror detected. Using bypass tool..."
               ORG=$(echo "$URL" | awk -F'/' '{print $5}')
               REPO=$(echo "$URL" | awk -F'/' '{print $6}')
               apkmd --org "$ORG" --repo "$REPO" --outDir "downloads_temp"
-            
             elif [[ "$URL" == magnet:* ]] || [[ "$URL" == *.torrent* ]]; then
-              echo "✅ Torrent/Magnet Detected. Starting Download..."
-              # Removed the slow manual bash watch logic in favor of aria2c handling it directly
-              # --seed-time=0 prevents infinite seeding which blocks termination
-              aria2c --seed-time=0 -d "downloads_temp" "$URL" --console-log-level=warn
+              aria2c --seed-time=0 -d "downloads_temp" "$URL"
             else
-              echo "✅ Direct Link Detected. Starting Download..."
-              aria2c -x 16 -s 16 -d "downloads_temp" "$URL" --console-log-level=warn
+              aria2c -x 16 -s 16 -d "downloads_temp" "$URL"
             fi
             
-            ITEM_COUNT=$(ls -1 downloads_temp/ 2>/dev/null | wc -l || echo 0)
-            if [ "$ITEM_COUNT" -eq 0 ]; then
-                echo "::warning::No file found to upload for URL: $URL"
-                continue
+            # ZIP logic for multiple files
+            ITEM_COUNT=$(ls -1 downloads_temp/ | wc -l)
+            if [ "$ITEM_COUNT" -gt 1 ]; then
+                FILENAME="upload_$(date +%s).zip"
+                (cd downloads_temp && zip -r "../$FILENAME" .)
+                rclone move -P "../$FILENAME" "$REMOTE:$UPLOAD_PATH"
+            else
+                rclone move -P "downloads_temp/" "$REMOTE:$UPLOAD_PATH"
             fi
-
-            FIRST_ITEM=$(ls downloads_temp/ | head -n 1)
-            
-            if [ "$ITEM_COUNT" -gt 1 ] || [ -d "downloads_temp/$FIRST_ITEM" ]; then
-                echo "📦 Multiple files or a folder detected. Creating ZIP archive..."
-                ZIP_NAME="${FIRST_ITEM// /_}.zip"
-                (cd downloads_temp && zip -r "../$ZIP_NAME" .)
-                rm -rf downloads_temp/*
-                mv "$ZIP_NAME" downloads_temp/
-            fi
-
-            FILENAME=$(ls downloads_temp/ | head -n 1)
-            echo "🚀 Final Upload: $FILENAME to $REMOTE..."
-            rclone move -P --stats 10s "downloads_temp/$FILENAME" "$REMOTE:$UPLOAD_PATH"
-            
-          done < processed_links.txt
-
-      - name: Cleanup
-        if: always()
-        run: rm -rf downloads_temp ~/.config/rclone/rclone.conf processed_links.txt
+          done < links.txt
