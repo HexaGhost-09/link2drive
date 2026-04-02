@@ -1,7 +1,7 @@
-# Optimized Base Image
+# Use a lightweight Ubuntu base
 FROM ubuntu:22.04
 
-# Prevent interactive prompts
+# Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install core high-performance tools in one layer
@@ -19,7 +19,8 @@ RUN apt-get update && apt-get install -y \
 RUN curl https://rclone.org/install.sh | bash && \
     npm install -g apkmirror-downloader
 
-# Set workspace
+# Set the working directory
 WORKDIR /data
 
+# Default command
 CMD ["bash"]
