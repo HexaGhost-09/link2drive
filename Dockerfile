@@ -1,10 +1,10 @@
-# Use a lightweight Ubuntu base
+# Optimized Base Image
 FROM ubuntu:22.04
 
-# Prevent interactive prompts during installation
+# Prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install core dependencies
+# Install core high-performance tools in one layer
 RUN apt-get update && apt-get install -y \
     curl \
     aria2 \
@@ -15,14 +15,11 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rclone
-RUN curl https://rclone.org/install.sh | bash
+# Install latest Rclone and APKMirror Downloader
+RUN curl https://rclone.org/install.sh | bash && \
+    npm install -g apkmirror-downloader
 
-# Install APKMirror Downloader
-RUN npm install -g apkmirror-downloader
-
-# Set the working directory
+# Set workspace
 WORKDIR /data
 
-# Default command
 CMD ["bash"]
