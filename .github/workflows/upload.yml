@@ -1,88 +1,42 @@
-name: Download & Upload via Rclone
+name: Magnet to Rclone Zip
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "Magnet or Direct URL"
+      magnet_link:
+        description: 'Magnet Link'
         required: true
-      remote_path:
-        description: "Rclone destination (example: gdrive:downloads)"
+      remote_name:
+        description: 'The name of the remote in your rclone.conf'
         required: true
+        default: 'remote'
 
 jobs:
-  upload:
+  transfer:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
-          sudo apt update
-          sudo apt install -y qbittorrent-nox unzip zip p7zip-full wget curl
+          sudo apt-get update
+          sudo apt-get install -y aria2 zip rclone
 
-      - name: Setup rclone
+      - name: Download Magnet
         run: |
-          mkdir -p ~/.config/rclone
-          cp rclone.conf ~/.config/rclone/rclone.conf
+          mkdir -p downloads
+          # Downloads the file and stops seeding immediately
+          aria2c --seed-time=0 \
+                 --summary-interval=5 \
+                 --dir=./downloads \
+                 "${{ github.event.inputs.magnet_link }}"
 
-      - name: Create download folder
-        run: mkdir -p downloads
-
-      # 🔽 Detect URL type
-      - name: Detect URL type
-        id: detect
+      - name: Zip Downloaded Content
         run: |
-          if [[ "${{ github.event.inputs.url }}" == magnet:* ]]; then
-            echo "type=magnet" >> $GITHUB_OUTPUT
-          else
-            echo "type=direct" >> $GITHUB_OUTPUT
-          fi
+          zip -r transfer_archive.zip ./downloads
 
-      # 🔽 Download Magnet (qBittorrent)
-      - name: Download via qBittorrent
-        if: steps.detect.outputs.type == 'magnet'
+      - name: Upload via Rclone
         run: |
-          qbittorrent-nox --daemon --profile=downloads
-          sleep 5
-          qbittorrent-nox --add-paused=false "${{ github.event.inputs.url }}"
-          
-          echo "Waiting for torrent to complete..."
-          while true; do
-            sleep 10
-            progress=$(qbittorrent-nox --list | grep -i "%")
-            echo "$progress"
-            echo "$progress" | grep "100%" && break
-          done
-
-      # 🔽 Download Direct
-      - name: Download direct file
-        if: steps.detect.outputs.type == 'direct'
-        run: |
-          cd downloads
-          wget -c "${{ github.event.inputs.url }}"
-
-      # 🔽 Prepare (zip if multiple files)
-      - name: Prepare files
-        run: |
-          cd downloads
-          count=$(ls | wc -l)
-
-          if [ "$count" -gt 1 ]; then
-            folder_name="package"
-            mkdir "$folder_name"
-            mv * "$folder_name"/ 2>/dev/null || true
-            zip -r "${folder_name}.zip" "$folder_name"
-            echo "UPLOAD_FILE=${folder_name}.zip" >> $GITHUB_ENV
-          else
-            file=$(ls)
-            echo "UPLOAD_FILE=$file" >> $GITHUB_ENV
-          fi
-
-      # 🔽 Upload with rclone (live progress)
-      - name: Upload to rclone
-        run: |
-          cd downloads
-          rclone copy "$UPLOAD_FILE" "${{ github.event.inputs.remote_path }}" -P --stats=5s
+          # Uses the rclone.conf file located in the root of your repo
+          rclone --config ./rclone.conf copy transfer_archive.zip "${{ github.event.inputs.remote_name }}:Downloads/"
