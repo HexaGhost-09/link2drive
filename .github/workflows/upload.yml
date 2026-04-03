@@ -1,97 +1,88 @@
-name: Download & Upload (High Speed - No Docker)
+name: Download & Upload via Rclone
 
 on:
-  push:
-    paths:
-      - 'urls.txt'
   workflow_dispatch:
     inputs:
-      manual_url:
-        description: 'Direct Link or Magnet/Torrent'
-        required: false
-      rclone_remote:
-        description: 'Remote Name (e.g., drime, gdrive)'
+      url:
+        description: "Magnet or Direct URL"
         required: true
-        default: 'drime'
-      upload_path:
-        description: 'Destination path'
-        required: false
-        default: '/'
+      remote_path:
+        description: "Rclone destination (example: gdrive:downloads)"
+        required: true
 
 jobs:
-  transfer:
+  upload:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install Tools Directly
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2 bc zip nodejs npm
-          sudo -v ; curl https://rclone.org/install.sh | sudo bash
-          sudo npm install -g apkmirror-downloader
+          sudo apt update
+          sudo apt install -y qbittorrent-nox unzip zip p7zip-full wget curl
 
-      - name: Configure Rclone
+      - name: Setup rclone
         run: |
-          mkdir -p ~/.config/rclone/
-          if [ -f "rclone.conf" ]; then
-            cp rclone.conf ~/.config/rclone/rclone.conf
+          mkdir -p ~/.config/rclone
+          cp rclone.conf ~/.config/rclone/rclone.conf
+
+      - name: Create download folder
+        run: mkdir -p downloads
+
+      # 🔽 Detect URL type
+      - name: Detect URL type
+        id: detect
+        run: |
+          if [[ "${{ github.event.inputs.url }}" == magnet:* ]]; then
+            echo "type=magnet" >> $GITHUB_OUTPUT
           else
-            echo "::error::rclone.conf is missing!"
-            exit 1
+            echo "type=direct" >> $GITHUB_OUTPUT
           fi
 
-      - name: Multi-Threaded Transfer
+      # 🔽 Download Magnet (qBittorrent)
+      - name: Download via qBittorrent
+        if: steps.detect.outputs.type == 'magnet'
         run: |
-          REMOTE="${{ github.event.inputs.rclone_remote || 'drime' }}"
-          UPLOAD_PATH="${{ github.event.inputs.rclone_remote || '/' }}"
+          qbittorrent-nox --daemon --profile=downloads
+          sleep 5
+          qbittorrent-nox --add-paused=false "${{ github.event.inputs.url }}"
           
-          # Prepare links from urls.txt or manual input
-          if [ ! -z "${{ github.event.inputs.manual_url }}" ]; then
-            echo "${{ github.event.inputs.manual_url }}" > links.txt
-          else
-            grep -v '^#' urls.txt | grep -v '^$' > links.txt || true
-          fi
-          
-          mkdir -p downloads_temp
-          
-          while IFS= read -r URL; do
-            echo "--- Processing: $URL ---"
-            rm -rf downloads_temp/*
-            
-            # 1. DOWNLOAD PHASE
-            if [[ "$URL" == *"apkmirror.com"* ]]; then
-              apkmd --org "$(echo "$URL" | awk -F'/' '{print $5}')" --repo "$(echo "$URL" | awk -F'/' '{print $6}')" --outDir "downloads_temp"
-            
-            elif [[ "$URL" == magnet:* ]] || [[ "$URL" == *.torrent* ]]; then
-              echo "🧲 Magnet/Torrent Detected - Killing process at 100%"
-              # CRITICAL FIX: --seed-ratio=0.0 stops the process immediately so rclone can start
-              aria2c --seed-time=0 --seed-ratio=0.0 --bt-stop-timeout=60 -d "downloads_temp" "$URL"
-            
-            else
-              echo "🔗 Direct Link Detected - 16 Threads High Speed"
-              # 16 simultaneous connections for maximum speed
-              aria2c -x 16 -s 16 -k 1M -d "downloads_temp" "$URL"
-            fi
-            
-            # 2. UPLOAD PHASE (rclone)
-            ITEM_COUNT=$(ls -1 downloads_temp/ | wc -l)
-            if [ "$ITEM_COUNT" -gt 0 ]; then
-                # Handle folders or multiple files by zipping
-                if [ "$ITEM_COUNT" -gt 1 ] || [ -d "downloads_temp/$(ls downloads_temp/ | head -n 1)" ]; then
-                    FILENAME="bundle_$(date +%s).zip"
-                    (cd downloads_temp && zip -r "../$FILENAME" .)
-                    echo "🚀 Uploading ZIP to $REMOTE..."
-                    rclone move -P "../$FILENAME" "$REMOTE:$UPLOAD_PATH"
-                else
-                    echo "🚀 Uploading file to $REMOTE..."
-                    rclone move -P "downloads_temp/" "$REMOTE:$UPLOAD_PATH"
-                fi
-            fi
-          done < links.txt
+          echo "Waiting for torrent to complete..."
+          while true; do
+            sleep 10
+            progress=$(qbittorrent-nox --list | grep -i "%")
+            echo "$progress"
+            echo "$progress" | grep "100%" && break
+          done
 
-      - name: Cleanup
-        if: always()
-        run: rm -rf downloads_temp links.txt
+      # 🔽 Download Direct
+      - name: Download direct file
+        if: steps.detect.outputs.type == 'direct'
+        run: |
+          cd downloads
+          wget -c "${{ github.event.inputs.url }}"
+
+      # 🔽 Prepare (zip if multiple files)
+      - name: Prepare files
+        run: |
+          cd downloads
+          count=$(ls | wc -l)
+
+          if [ "$count" -gt 1 ]; then
+            folder_name="package"
+            mkdir "$folder_name"
+            mv * "$folder_name"/ 2>/dev/null || true
+            zip -r "${folder_name}.zip" "$folder_name"
+            echo "UPLOAD_FILE=${folder_name}.zip" >> $GITHUB_ENV
+          else
+            file=$(ls)
+            echo "UPLOAD_FILE=$file" >> $GITHUB_ENV
+          fi
+
+      # 🔽 Upload with rclone (live progress)
+      - name: Upload to rclone
+        run: |
+          cd downloads
+          rclone copy "$UPLOAD_FILE" "${{ github.event.inputs.remote_path }}" -P --stats=5s
