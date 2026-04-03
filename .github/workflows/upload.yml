@@ -26,17 +26,27 @@ jobs:
       - name: Download Magnet
         run: |
           mkdir -p downloads
-          # Downloads the file and stops seeding immediately
+          # Download and stop seeding immediately
           aria2c --seed-time=0 \
                  --summary-interval=5 \
                  --dir=./downloads \
                  "${{ github.event.inputs.magnet_link }}"
 
-      - name: Zip Downloaded Content
+      - name: Zip with Real Folder Name
+        id: naming
         run: |
-          zip -r transfer_archive.zip ./downloads
+          # Identify the actual folder or file name inside the downloads directory
+          REAL_NAME=$(ls downloads | head -n 1)
+          echo "Detected Name: $REAL_NAME"
+          
+          # Save the name to environment variables for the next step
+          echo "REAL_NAME=$REAL_NAME" >> $GITHUB_ENV
+          
+          # Zip the content using the real name
+          # -j is NOT used because we want the real folder structure
+          cd downloads && zip -r "../${REAL_NAME}.zip" "$REAL_NAME"
 
       - name: Upload via Rclone
         run: |
-          # Uses the rclone.conf file located in the root of your repo
-          rclone --config ./rclone.conf copy transfer_archive.zip "${{ github.event.inputs.remote_name }}:Downloads/"
+          # Uses the rclone.conf in root and the dynamic zip name
+          rclone --config ./rclone.conf copy "${{ env.REAL_NAME }}.zip" "${{ github.event.inputs.remote_name }}:Downloads/"
