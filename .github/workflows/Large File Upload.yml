@@ -1,0 +1,25 @@
+- name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 rclone fuse
+
+      - name: Download directly to Cloud
+        run: |
+          mkdir -p /mnt/remote
+          
+          # Mount the remote drive in the background
+          # We turn off VFS caching so it doesn't try to save to the runner's disk first
+          rclone --config ./rclone.conf mount "${{ github.event.inputs.remote_name }}:Downloads/" /mnt/remote --daemon --vfs-cache-mode off
+          
+          # Wait a few seconds for the mount to establish
+          sleep 5
+          
+          # Download directly into the mounted cloud folder
+          # --file-allocation=none is CRITICAL here, otherwise aria2 will try to reserve the full file size instantly and fail
+          aria2c --seed-time=0 \
+                 --summary-interval=5 \
+                 --file-allocation=none \
+                 --dir=/mnt/remote \
+                 "${{ github.event.inputs.magnet_link }}"
+                 
+          # No upload step needed! The file is already in your remote.
