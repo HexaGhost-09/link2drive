@@ -1,0 +1,38 @@
+name: Magnet to Rclone Direct Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      magnet_link:
+        description: 'Magnet Link'
+        required: true
+      remote_name:
+        description: 'The name of the remote in your rclone.conf'
+        required: true
+        default: 'remote'
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 rclone
+
+      - name: Download Magnet
+        run: |
+          mkdir -p downloads
+          # Download and stop seeding immediately
+          aria2c --seed-time=0 \
+                 --summary-interval=5 \
+                 --dir=./downloads \
+                 "${{ github.event.inputs.magnet_link }}"
+
+      - name: Upload via Rclone
+        run: |
+          # Uses the rclone.conf in root and uploads the contents of the downloads folder directly
+          rclone --config ./rclone.conf copy ./downloads/ "${{ github.event.inputs.remote_name }}:Downloads/"
