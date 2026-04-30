@@ -1,25 +1,53 @@
-- name: Install Dependencies
+name: Magnet to Rclone Cloud Bypass
+
+on:
+  workflow_dispatch:
+    inputs:
+      magnet_link:
+        description: 'Magnet Link'
+        required: true
+      remote_name:
+        description: 'The name of the remote in your rclone.conf'
+        required: true
+        default: 'remote'
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 rclone fuse
+          # fuse3 is required for rclone to mount drives on modern Ubuntu
+          sudo apt-get install -y aria2 rclone fuse3
 
-      - name: Download directly to Cloud
+      - name: Mount Cloud and Download
         run: |
-          mkdir -p /mnt/remote
+          # 1. Create a local directory to act as the gateway to your cloud
+          mkdir -p ./cloud_drive
           
-          # Mount the remote drive in the background
-          # We turn off VFS caching so it doesn't try to save to the runner's disk first
-          rclone --config ./rclone.conf mount "${{ github.event.inputs.remote_name }}:Downloads/" /mnt/remote --daemon --vfs-cache-mode off
+          # 2. Mount the remote drive in the background (--daemon)
+          # --vfs-cache-mode off is crucial so it doesn't secretly cache files on the runner's disk
+          rclone --config ./rclone.conf mount "${{ github.event.inputs.remote_name }}:Downloads/" ./cloud_drive --daemon --vfs-cache-mode off
           
-          # Wait a few seconds for the mount to establish
+          # Wait 5 seconds to ensure the connection to the cloud drive is fully established
+          echo "Waiting for mount to initialize..."
           sleep 5
           
-          # Download directly into the mounted cloud folder
-          # --file-allocation=none is CRITICAL here, otherwise aria2 will try to reserve the full file size instantly and fail
+          # 3. Download the magnet link directly into the cloud gateway
+          # --file-allocation=none is CRITICAL. Without it, aria2 tries to pre-allocate the 
+          # massive file over the network instantly, which will crash or freeze.
           aria2c --seed-time=0 \
                  --summary-interval=5 \
                  --file-allocation=none \
-                 --dir=/mnt/remote \
+                 --dir=./cloud_drive \
                  "${{ github.event.inputs.magnet_link }}"
-                 
-          # No upload step needed! The file is already in your remote.
+
+      - name: Safely Unmount
+        if: always()
+        run: |
+          # Flush any remaining data and safely disconnect the drive
+          fusermount -u ./cloud_drive || true
