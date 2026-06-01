@@ -1,4 +1,4 @@
-Name: Magnet to Rclone Direct Upload (BitTorrent Edition)
+name: Magnet to Rclone Direct Upload (BitTorrent Edition)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
       remote_name:
         description: 'The name of the remote in your rclone.conf'
         required: true
-        default: 'gdrive'  # <-- Changed the default remote input to gdrive
+        default: 'gdrive'
 
 jobs:
   transfer:
@@ -21,26 +21,19 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          # transmission-cli gives us the direct bittorrent client binary
           sudo apt-get install -y transmission-cli rclone
 
       - name: Setup Rclone Config
         run: |
-          # Populates the rclone configuration dynamically using your GitHub Secret
           echo "${{ secrets.RCLONE_CONF }}" > ./rclone.conf
 
       - name: Download via BitTorrent Engine
         run: |
           mkdir -p downloads
-          
           echo "Starting BitTorrent Download..."
-          # -w specifies the target directory
-          # -f finishes the task and exits automatically when download hits 100% (stops seeding)
           transmission-cli -w ./downloads/ -f "" "${{ github.event.inputs.magnet_link }}"
-          
           echo "Download finished successfully!"
 
       - name: Upload via Rclone
         run: |
-          # Copies everything directly over to your cloud remote with a visible progress bar
           rclone --config ./rclone.conf copy ./downloads/ "${{ github.event.inputs.remote_name }}:Downloads/" --progress
