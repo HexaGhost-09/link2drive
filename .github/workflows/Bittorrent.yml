@@ -31,9 +31,13 @@ jobs:
         run: |
           mkdir -p downloads
           echo "Starting BitTorrent Download..."
-          transmission-cli -w ./downloads/ -f "" "${{ github.event.inputs.magnet_link }}"
-          echo "Download finished successfully!"
+          
+          # --seedratio 0 tells transmission to stop completely at 100% download
+          transmission-cli --seedratio 0 -w ./downloads/ "${{ github.event.inputs.magnet_link }}"
+          
+          echo "Download finished successfully! Moving to upload step..."
 
       - name: Upload via Rclone
         run: |
+          # This step will ONLY execute after transmission-cli completely exits at 100%
           rclone --config ./rclone.conf copy ./downloads/ "${{ github.event.inputs.remote_name }}:Downloads/" --progress
