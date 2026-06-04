@@ -32,8 +32,8 @@ jobs:
           mkdir -p downloads
           echo "Starting BitTorrent Download..."
           
-          # --seedratio 0 tells transmission to stop completely at 100% download
-          transmission-cli --seedratio 0 -w ./downloads/ "${{ github.event.inputs.magnet_link }}"
+          # -m tells transmission-cli to exit immediately upon 100% completion (no seeding)
+          transmission-cli -m -w ./downloads/ "${{ github.event.inputs.magnet_link }}"
           
           echo "Download finished successfully! Moving to upload step..."
 
