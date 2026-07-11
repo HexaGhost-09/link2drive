@@ -1,0 +1,79 @@
+name: Magnet to Rclone Direct Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      magnet_link:
+        description: 'Magnet Link or Direct Download URL'
+        required: true
+      remote_name:
+        description: 'The name of the remote in your rclone.conf'
+        required: true
+        default: 'remote'
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 rclone
+
+      - name: Download
+        shell: bash
+        run: |
+          mkdir -p downloads
+
+          INPUT="${{ github.event.inputs.magnet_link }}"
+
+          if [[ "$INPUT" == magnet:* ]]; then
+            echo "Detected Magnet Link"
+
+            aria2c \
+              --seed-time=0 \
+              --summary-interval=5 \
+              --dir=downloads \
+              --bt-max-peers=120 \
+              --file-allocation=falloc \
+              "$INPUT"
+
+          else
+            echo "Detected Direct URL"
+
+            # Extract filename from URL (removes ?download=true)
+            FILENAME=$(basename "${INPUT%%\?*}")
+
+            echo "Saving as: $FILENAME"
+
+            aria2c \
+              --dir=downloads \
+              --out="$FILENAME" \
+              --continue=true \
+              --auto-file-renaming=false \
+              --content-disposition-default-utf8=true \
+              "$INPUT"
+          fi
+
+      - name: Show Downloaded Files
+        run: |
+          echo "Downloaded files:"
+          ls -lah downloads
+
+      - name: Upload via Rclone
+        run: |
+          echo "Starting Upload..."
+
+          rclone --config ./rclone.conf copy ./downloads/ "${{ github.event.inputs.remote_name }}:Downloads/" \
+            --progress \
+            --drive-chunk-size 128M \
+            --transfers 8 \
+            --checkers 16 \
+            --fast-list
+
+      - name: Done
+        run: echo "Upload Complete!"
