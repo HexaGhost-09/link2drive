@@ -76,16 +76,39 @@ jobs:
               "$INPUT"
           fi
 
+          # Determine the actual top-level name of what was downloaded
+          # (a single file, or a single torrent folder)
+          ENTRY_COUNT=$(find downloads -mindepth 1 -maxdepth 1 | wc -l)
+
+          if [ "$ENTRY_COUNT" -eq 1 ]; then
+            BASE_NAME=$(basename "$(find downloads -mindepth 1 -maxdepth 1)")
+          else
+            # Multiple top-level items (rare for magnets with loose files) —
+            # fall back to a generic name
+            BASE_NAME="Downloads"
+          fi
+
+          # Strip the extension if it's a single file, so archive gets a clean name
+          if [ -f "downloads/$BASE_NAME" ]; then
+            NAME_NO_EXT="${BASE_NAME%.*}"
+          else
+            NAME_NO_EXT="$BASE_NAME"
+          fi
+
+          echo "Detected name: $NAME_NO_EXT"
+          echo "UPLOAD_NAME=$NAME_NO_EXT" >> "$GITHUB_ENV"
+
       - name: Show Downloaded Files
         run: |
           echo "Downloaded files:"
           ls -lah downloads
+          echo "Upload name will be: $UPLOAD_NAME"
 
       - name: Compress Files (Optional)
         if: ${{ github.event.inputs.zip_mode == 'zip' }}
         run: |
           mkdir -p upload
-          zip -r upload/archive.zip downloads
+          zip -r "upload/${UPLOAD_NAME}.zip" downloads
 
       - name: Prepare Normal Upload
         if: ${{ github.event.inputs.zip_mode == 'normal' }}
@@ -109,9 +132,8 @@ jobs:
         run: |
           set -e
 
-          # Figure out what to share: the zip, or the single file, or the whole folder
           if [ "${{ github.event.inputs.zip_mode }}" == "zip" ]; then
-            TARGET_PATH="Downloads/archive.zip"
+            TARGET_PATH="Downloads/${UPLOAD_NAME}.zip"
           else
             FILE_COUNT=$(find upload -maxdepth 1 -type f | wc -l)
             if [ "$FILE_COUNT" -eq 1 ]; then
@@ -124,13 +146,11 @@ jobs:
 
           echo "Sharing: ${{ github.event.inputs.remote_name }}:$TARGET_PATH"
 
-          # Make it public + get the shareable link via rclone
           rclone --config ./rclone.conf link "${{ github.event.inputs.remote_name }}:$TARGET_PATH" > gdrive_link.txt
           FINAL_URL=$(cat gdrive_link.txt)
 
           echo "Google Drive Link: $FINAL_URL"
 
-          # Shorten it via ShrinkRL (no API key needed)
           RESPONSE=$(curl -s -X POST https://api.shrinkrl.com/api/v1/urls \
             -H "Content-Type: application/json" \
             -d "{\"url\":{\"original_url\":\"$FINAL_URL\"}}")
@@ -141,6 +161,8 @@ jobs:
 
           {
             echo "### 🔗 Upload Links"
+            echo ""
+            echo "**Name:** $UPLOAD_NAME"
             echo ""
             echo "**Final Google Drive URL:**"
             echo "$FINAL_URL"
