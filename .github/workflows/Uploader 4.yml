@@ -9,7 +9,7 @@ on:
       remote_name:
         description: 'The name of the remote in your rclone.conf'
         required: true
-        default: 'remote'
+        default: 'gdrive'
 
 jobs:
   transfer:
