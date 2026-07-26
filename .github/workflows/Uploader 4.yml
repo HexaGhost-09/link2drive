@@ -21,6 +21,15 @@ on:
           - normal
           - zip
 
+      link_sharing:
+        description: 'Share uploaded Google Drive files?'
+        required: true
+        type: choice
+        default: 'false'
+        options:
+          - 'false'
+          - 'true'
+
 jobs:
   transfer:
     runs-on: ubuntu-latest
