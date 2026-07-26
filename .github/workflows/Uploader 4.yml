@@ -41,7 +41,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 rclone zip
+          sudo apt-get install -y aria2 rclone zip jq
 
       - name: Download
         shell: bash
@@ -64,9 +64,7 @@ jobs:
           else
             echo "Detected Direct URL"
 
-            # Extract filename from URL (removes ?download=true)
             FILENAME=$(basename "${INPUT%%\?*}")
-
             echo "Saving as: $FILENAME"
 
             aria2c \
@@ -105,6 +103,51 @@ jobs:
             --transfers 8 \
             --checkers 16 \
             --fast-list
+
+      - name: Share & Shorten Link
+        if: ${{ github.event.inputs.link_sharing == 'true' }}
+        run: |
+          set -e
+
+          # Figure out what to share: the zip, or the single file, or the whole folder
+          if [ "${{ github.event.inputs.zip_mode }}" == "zip" ]; then
+            TARGET_PATH="Downloads/archive.zip"
+          else
+            FILE_COUNT=$(find upload -maxdepth 1 -type f | wc -l)
+            if [ "$FILE_COUNT" -eq 1 ]; then
+              FILE_NAME=$(find upload -maxdepth 1 -type f -printf "%f\n")
+              TARGET_PATH="Downloads/$FILE_NAME"
+            else
+              TARGET_PATH="Downloads"
+            fi
+          fi
+
+          echo "Sharing: ${{ github.event.inputs.remote_name }}:$TARGET_PATH"
+
+          # Make it public + get the shareable link via rclone
+          rclone --config ./rclone.conf link "${{ github.event.inputs.remote_name }}:$TARGET_PATH" > gdrive_link.txt
+          FINAL_URL=$(cat gdrive_link.txt)
+
+          echo "Google Drive Link: $FINAL_URL"
+
+          # Shorten it via ShrinkRL (no API key needed)
+          RESPONSE=$(curl -s -X POST https://api.shrinkrl.com/api/v1/urls \
+            -H "Content-Type: application/json" \
+            -d "{\"url\":{\"original_url\":\"$FINAL_URL\"}}")
+
+          SHORT_URL=$(echo "$RESPONSE" | jq -r '.short_url')
+
+          echo "Short URL: $SHORT_URL"
+
+          {
+            echo "### 🔗 Upload Links"
+            echo ""
+            echo "**Final Google Drive URL:**"
+            echo "$FINAL_URL"
+            echo ""
+            echo "**Short URL:**"
+            echo "$SHORT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Done
         run: echo "Upload Complete!"
