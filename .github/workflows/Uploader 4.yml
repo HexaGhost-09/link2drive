@@ -6,10 +6,20 @@ on:
       magnet_link:
         description: 'Magnet Link or Direct Download URL'
         required: true
+
       remote_name:
         description: 'The name of the remote in your rclone.conf'
         required: true
         default: 'gdrive'
+
+      zip_mode:
+        description: 'Upload Mode'
+        required: true
+        type: choice
+        default: normal
+        options:
+          - normal
+          - zip
 
 jobs:
   transfer:
@@ -22,7 +32,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 rclone
+          sudo apt-get install -y aria2 rclone zip
 
       - name: Download
         shell: bash
@@ -64,11 +74,23 @@ jobs:
           echo "Downloaded files:"
           ls -lah downloads
 
+      - name: Compress Files (Optional)
+        if: ${{ github.event.inputs.zip_mode == 'zip' }}
+        run: |
+          mkdir -p upload
+          zip -r upload/archive.zip downloads
+
+      - name: Prepare Normal Upload
+        if: ${{ github.event.inputs.zip_mode == 'normal' }}
+        run: |
+          mkdir -p upload
+          cp -r downloads/. upload/
+
       - name: Upload via Rclone
         run: |
           echo "Starting Upload..."
 
-          rclone --config ./rclone.conf copy ./downloads/ "${{ github.event.inputs.remote_name }}:Downloads/" \
+          rclone --config ./rclone.conf copy ./upload/ "${{ github.event.inputs.remote_name }}:Downloads/" \
             --progress \
             --drive-chunk-size 128M \
             --transfers 8 \
