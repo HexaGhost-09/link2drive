@@ -10,7 +10,7 @@ on:
       remote_name:
         description: 'The name of the remote in your rclone.conf'
         required: true
-        default: 'gdrive'
+        default: 'drime'
 
       zip_mode:
         description: 'Upload Mode'
@@ -22,7 +22,7 @@ on:
           - zip
 
       link_sharing:
-        description: 'Share uploaded Google Drive files?'
+        description: 'Generate a share link for the uploaded file/folder?'
         required: true
         type: choice
         default: 'false'
@@ -41,7 +41,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 rclone zip jq
+          sudo apt-get install -y aria2 rclone zip jq curl
 
       - name: Download
         shell: bash
