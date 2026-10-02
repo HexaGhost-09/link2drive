@@ -10,7 +10,7 @@ on:
       remote_name:
         description: 'The name of the remote in your rclone.conf'
         required: true
-        default: 'drime'
+        default: 'gdrive'
 
       zip_mode:
         description: 'Upload Mode'
