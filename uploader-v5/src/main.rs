@@ -163,7 +163,6 @@ async fn main() -> Result<()> {
                     bail!("Source returned an unexpected Content-Range: {}", range);
                 }
             }
-            retries = 0;
             resumed
         };
 
