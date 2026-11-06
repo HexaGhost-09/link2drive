@@ -1,6 +1,6 @@
 [package]
 name = "link2drive-stream"
-version = "5.1.0"
+version = "5.2.0"
 edition = "2021"
 description = "Stream a direct HTTP download into an rclone remote without staging the full file locally"
 license = "MIT"
