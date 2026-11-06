@@ -1,4 +1,4 @@
-name: Uploader V5 - Direct URL Streaming
+name: Uploader V5.1 - Prebuilt Direct URL Streaming
 
 on:
   workflow_dispatch:
@@ -36,9 +36,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Install rclone
         run: |
           curl --fail --silent --show-error https://rclone.org/install.sh | sudo bash
@@ -64,8 +61,13 @@ jobs:
             exit 1
           }
 
-      - name: Build Rust streaming uploader
-        run: cargo build --release --manifest-path uploader-v5/Cargo.toml
+      - name: Download prebuilt Rust uploader
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/HexaGhost-09/link2drive/releases/download/v5.1.0/link2drive-stream-linux-x86_64" \
+            --output "$RUNNER_TEMP/link2drive-stream"
+          chmod +x "$RUNNER_TEMP/link2drive-stream"
 
       - name: Stream direct URL to cloud remote
         id: upload
@@ -75,7 +77,7 @@ jobs:
           OUTPUT_FILENAME: ${{ inputs.filename }}
         run: |
           set -euo pipefail
-          ./uploader-v5/target/release/link2drive-stream \
+          "$RUNNER_TEMP/link2drive-stream" \
             "$DIRECT_URL" "$REMOTE_NAME" "$OUTPUT_FILENAME"
 
       - name: Generate share link
