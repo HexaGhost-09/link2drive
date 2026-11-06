@@ -1,0 +1,18 @@
+[package]
+name = "link2drive-stream"
+version = "5.0.0"
+edition = "2021"
+description = "Stream a direct HTTP download into an rclone remote without staging the full file locally"
+license = "MIT"
+
+[[bin]]
+name = "link2drive-stream"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+futures-util = "0.3"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "time"] }
+url = "2"
