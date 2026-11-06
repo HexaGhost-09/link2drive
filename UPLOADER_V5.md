@@ -1,30 +1,38 @@
-# Uploader V5.1 — Prebuilt Rust binary
+# Uploader V5 — Direct URL Streaming
 
-V5.1 is a separate workflow from V5. It downloads a precompiled Linux x86_64 executable at upload time, so normal upload runs do not install Rust, download crates, or compile the program.
+V5 streams a direct HTTP/HTTPS download into an rclone remote. It does not save the complete file on the GitHub runner.
 
-## First-time setup
+## What it does
 
-1. Open **Actions → Build and publish Uploader V5.1 binary**.
-2. Select **Run workflow** and wait for it to finish successfully.
-3. This creates the GitHub Release `v5.1.0` with the binary `link2drive-stream-linux-x86_64` and its SHA-256 checksum.
-4. Ensure the repository Actions secret `RCLONE_CONFIG_CONTENT` contains a newly rotated rclone configuration. Do not reuse any credentials previously pasted into chat or committed to the repository.
+- Uses a Rust program (`uploader-v5`) to read the source response as a byte stream.
+- Pipes the stream into `rclone rcat`, which uploads to the selected remote.
+- Uses the source Content-Length when available so rclone can preallocate and stream the upload.
+- Detects the filename from Content-Disposition, falling back to the URL path. You can override it in the workflow inputs.
+- If the source connection drops, it attempts to resume with an HTTP Range request (up to five retries). The source must support Range requests for this recovery to work.
+- Optionally creates a share link with `rclone link`.
 
-## Uploading
+## One-time setup
 
-1. Open **Actions → Uploader V5.1 - Prebuilt Direct URL Streaming**.
-2. Enter a direct HTTP/HTTPS file URL, remote name (normally `gdrive`), optional filename, and link-sharing preference.
-3. Run the workflow.
+1. **Rotate credentials in the existing `rclone.conf`.** The repository copy contains credentials/tokens and must be treated as compromised. Revoke/refresh the exposed credentials with their providers. Do not reuse the committed file.
+2. Create a fresh rclone configuration locally with the remote you want to use (normally `gdrive`).
+3. In GitHub, open **Settings → Secrets and variables → Actions → New repository secret**.
+4. Create a secret named **`RCLONE_CONFIG_CONTENT`**. Paste the complete fresh rclone configuration as its value.
+5. Run **Actions → Uploader V5 - Direct URL Streaming → Run workflow**.
 
-The uploader saves the download stream directly into `rclone rcat`; it does not stage the complete file on the runner. The regular upload workflow downloads the prebuilt executable from the public GitHub Release.
+## Inputs
 
-## Updating the binary
+- `direct_url`: direct HTTP/HTTPS file URL (not a webpage containing a download button).
+- `remote_name`: remote name from the secret config; defaults to `gdrive`.
+- `filename`: optional filename override.
+- `link_sharing`: optionally create a link after upload.
 
-When the Rust source changes, update the release asset by running **Build and publish Uploader V5.1 binary** again. The workflow publishes/replaces the asset for release tag `v5.1.0`.
+The remote destination is `<remote>:Downloads/<filename>`.
 
-## Notes
+## Important limitations
 
-- The prebuilt binary targets GitHub-hosted Ubuntu x86_64 runners.
-- The first build/release is required before the V5.1 upload workflow can run.
-- The source URL must be a direct HTTP/HTTPS response. HTTP Range support is required for recovery from a mid-stream download interruption.
-- The workflow still has the GitHub-hosted job time limit; prebuilding removes compile time, not transfer time.
-- The uploader uses rclone for remote access. The rclone config must include the chosen remote.
+- This is a streaming transfer: runner disk use stays small, but network traffic and job time still apply.
+- GitHub-hosted jobs have a finite execution limit (the workflow is set to six hours). A 100 GB transfer must finish within that window.
+- A source that blocks automated requests, requires browser cookies, or does not provide a direct file response may fail.
+- Automatic source-resume requires HTTP Range support. If the GitHub job itself is cancelled or the rclone process exits, the transfer must be started again; this workflow does not persist an upload session between separate workflow runs.
+- The workflow currently targets rclone remotes that support streaming uploads. The `--drive-chunk-size` setting is intended for Google Drive.
+- ZIP mode and torrent/magnet downloads are intentionally not included in V5; those workflows need local staging or a separate streaming archive/torrent design.
