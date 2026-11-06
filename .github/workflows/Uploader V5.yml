@@ -32,9 +32,6 @@ jobs:
   transfer:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    env:
-      RCLONE_CONFIG: ${{ runner.temp }}/rclone.conf
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,6 +50,8 @@ jobs:
           REMOTE_NAME: ${{ inputs.remote_name }}
         run: |
           set -euo pipefail
+          export RCLONE_CONFIG="$RUNNER_TEMP/rclone.conf"
+          echo "RCLONE_CONFIG=$RCLONE_CONFIG" >> "$GITHUB_ENV"
           if [ -z "${RCLONE_CONFIG_CONTENT}" ]; then
             echo "::error::Add a repository Actions secret named RCLONE_CONFIG_CONTENT containing your rotated rclone.conf."
             exit 1
