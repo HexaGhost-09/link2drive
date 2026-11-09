@@ -1,8 +1,0 @@
-# Add one URL per line.
-# Supported:
-#   https://filekeeper.net/<file-id>/<filename>
-#   https://paste.fitgirl-repacks.site/<paste>?<id>#<key>
-#
-# Keep private paste keys out of public repositories.
-
-https://paste.fitgirl-repacks.site/?a872b81941b75e91#3ruJ3tuurtDpQ7UknSaYwYggYsLA5KFuUykeQYoWV1uL
