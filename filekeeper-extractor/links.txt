@@ -4,3 +4,5 @@
 #   https://paste.fitgirl-repacks.site/<paste>?<id>#<key>
 #
 # Keep private paste keys out of public repositories.
+
+https://paste.fitgirl-repacks.site/?7f6550391325d69f#E4tU7JMpeA7hVa5dexVT2hy3XDF5R3NekwdVdiK326wK
