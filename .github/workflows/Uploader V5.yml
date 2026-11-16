@@ -1,20 +1,16 @@
-name: Uploader V5 - Multiple Direct URLs
+name: Uploader V5 - Smart Batch Downloads
 
 on:
   workflow_dispatch:
     inputs:
       direct_urls:
-        description: "Paste one or more direct HTTP/HTTPS URLs (one URL per line)"
+        description: "Paste direct HTTP/HTTPS URLs (one URL per line, up to 20)"
         required: true
         type: string
       remote_name:
         description: "Name of the rclone remote (must exist in RCLONE_CONFIG_CONTENT)"
         required: true
         default: "gdrive"
-        type: string
-      filename:
-        description: "Optional filename override (only for a single URL; otherwise leave empty)"
-        required: false
         type: string
 
 permissions:
@@ -27,9 +23,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Install rclone
         run: |
@@ -45,7 +38,7 @@ jobs:
           export RCLONE_CONFIG="$RUNNER_TEMP/rclone.conf"
           echo "RCLONE_CONFIG=$RCLONE_CONFIG" >> "$GITHUB_ENV"
           if [ -z "${RCLONE_CONFIG_CONTENT}" ]; then
-            echo "::error::Add a repository Actions secret named RCLONE_CONFIG_CONTENT containing your rotated rclone.conf."
+            echo "::error::Add a repository Actions secret named RCLONE_CONFIG_CONTENT."
             exit 1
           fi
           umask 077
@@ -56,85 +49,148 @@ jobs:
             exit 1
           }
 
-      - name: Build Rust streaming uploader
-        run: cargo build --release --manifest-path uploader-v5/Cargo.toml
-
-      - name: Upload all URLs privately
+      - name: Smart download, batch upload, and cleanup
         env:
           DIRECT_URLS: ${{ inputs.direct_urls }}
           REMOTE_NAME: ${{ inputs.remote_name }}
-          OUTPUT_FILENAME: ${{ inputs.filename }}
         shell: bash
         run: |
           set -euo pipefail
-
-          URLS_FILE="$RUNNER_TEMP/direct-urls.txt"
-          printf '%s' "$DIRECT_URLS" | tr -d '\r' > "$URLS_FILE"
-
-          mapfile -t URL_LIST < <(sed '/^[[:space:]]*$/d; /^[[:space:]]*#/d' "$URLS_FILE")
-          URL_COUNT="${#URL_LIST[@]}"
-
-          if [ "$URL_COUNT" -eq 0 ]; then
-            echo "::error::Paste at least one direct URL, with one URL per line."
-            exit 1
-          fi
-
-          if [ "$URL_COUNT" -gt 20 ]; then
-            echo "::error::A maximum of 20 URLs is allowed per run."
-            exit 1
-          fi
-
-          if [ -n "${OUTPUT_FILENAME//[[:space:]]/}" ] && [ "$URL_COUNT" -ne 1 ]; then
-            echo "::error::Filename override is only supported for a single URL. Leave it empty for multiple URLs."
-            exit 1
-          fi
-
-          {
-            echo "## Uploader V5 — Upload results"
-            echo ""
-            echo "**Files queued:** $URL_COUNT"
-            echo "**Destination:** ${REMOTE_NAME}:Downloads/"
-            echo "**Sharing:** Private — no public Drive permissions or share links are created."
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          INDEX=0
-          for URL in "${URL_LIST[@]}"; do
-            URL="$(printf '%s' "$URL" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-            case "$URL" in
-              https://*|http://*) ;;
-              *)
-                echo "::error::Line $((INDEX + 1)) is not an HTTP/HTTPS URL."
-                exit 1
-                ;;
-            esac
-
-            echo "::group::Uploading $((INDEX + 1))/$URL_COUNT"
-            echo "Source: $URL"
-            OUTPUT_FILE="$RUNNER_TEMP/uploader-output-$INDEX"
-            if [ -n "$OUTPUT_FILENAME" ]; then
-              GITHUB_OUTPUT="$OUTPUT_FILE" ./uploader-v5/target/release/link2drive-stream "$URL" "$REMOTE_NAME" "$OUTPUT_FILENAME"
-            else
-              GITHUB_OUTPUT="$OUTPUT_FILE" ./uploader-v5/target/release/link2drive-stream "$URL" "$REMOTE_NAME"
-            fi
-
-            FILE_NAME="$(sed -n 's/^filename=//p' "$OUTPUT_FILE" | tail -n 1)"
-            TARGET="$(sed -n 's/^target=//p' "$OUTPUT_FILE" | tail -n 1)"
-            if [ -z "$FILE_NAME" ] || [ -z "$TARGET" ]; then
-              echo "::error::Uploader did not return the uploaded file details."
-              exit 1
-            fi
-
-            {
-              echo "### $((INDEX + 1)). $FILE_NAME"
-              echo ""
-              echo "- **Remote path:** `$TARGET`"
-              echo "- **Access:** Private (no public link created)"
-              echo ""
-            } >> "$GITHUB_STEP_SUMMARY"
-
-            echo "::endgroup::"
-            INDEX=$((INDEX + 1))
-          done
-
-          echo "Successfully uploaded $INDEX file(s)."
+          printf '%s' "$DIRECT_URLS" | tr -d '\r' > "$RUNNER_TEMP/direct-urls.txt"
+          python3 - "$RUNNER_TEMP/direct-urls.txt" "$REMOTE_NAME" <<'PY'
+          import concurrent.futures
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import tempfile
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+          
+          URL_FILE, REMOTE = sys.argv[1], sys.argv[2]
+          MAX_URLS = 20
+          SMALL_LIMIT = 500_000_000       # 500 MB
+          LARGE_LIMIT = 3_000_000_000     # 3 GB
+          
+          with open(URL_FILE, encoding="utf-8") as f:
+              urls = [line.strip() for line in f if line.strip() and not line.lstrip().startswith("#")]
+          if not urls:
+              raise SystemExit("Paste at least one direct URL.")
+          if len(urls) > MAX_URLS:
+              raise SystemExit(f"Maximum {MAX_URLS} URLs per run.")
+          for i, url in enumerate(urls, 1):
+              if not url.startswith(("http://", "https://")):
+                  raise SystemExit(f"Line {i} is not an HTTP/HTTPS URL.")
+          
+          def probe(url):
+              # Prefer HEAD. Fall back to a one-byte range request if HEAD is unsupported.
+              try:
+                  req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Uploader-V5/5.4"})
+                  with urllib.request.urlopen(req, timeout=45) as response:
+                      length = response.headers.get("Content-Length")
+                      if length and length.isdigit():
+                          return int(length), response.headers.get("Content-Disposition")
+              except Exception:
+                  pass
+              try:
+                  req = urllib.request.Request(url, headers={"Range": "bytes=0-0", "User-Agent": "Uploader-V5/5.4"})
+                  with urllib.request.urlopen(req, timeout=45) as response:
+                      content_range = response.headers.get("Content-Range", "")
+                      match = re.search(r"/(\d+)$", content_range)
+                      if match:
+                          return int(match.group(1)), response.headers.get("Content-Disposition")
+                      length = response.headers.get("Content-Length")
+                      if response.status == 200 and length and length.isdigit():
+                          return int(length), response.headers.get("Content-Disposition")
+              except Exception:
+                  pass
+              return None, None
+          
+          def clean_name(name):
+              name = name.replace("\\", "_").replace("/", "_")
+              name = "".join(c for c in name if c.isprintable() and c not in '<>:"|?*')
+              name = name.strip(" .")
+              return name or "download.bin"
+          
+          def filename_for(url, disposition, index):
+              if disposition:
+                  match = re.search(r'filename\*?=(?:UTF-8\'\'|")?([^";]+)', disposition, re.I)
+                  if match:
+                      name = match.group(1).strip().strip('"')
+                      if name:
+                          return clean_name(name)
+              from urllib.parse import unquote, urlparse
+              name = unquote(urlparse(url).path.rsplit("/", 1)[-1])
+              return clean_name(name) if name else f"download-{index}.bin"
+          
+          print("Checking file sizes to select safe concurrency limits...")
+          items = []
+          for index, url in enumerate(urls, 1):
+              size, disposition = probe(url)
+              name = filename_for(url, disposition, index)
+              items.append({"index": index, "url": url, "size": size, "name": name})
+              if size is None:
+                  print(f"[{index}/{len(urls)}] {name}: size unknown — process alone")
+              else:
+                  print(f"[{index}/{len(urls)}] {name}: {size / 1_000_000:.1f} MB")
+          
+          # Large files (>3 GB): one at a time. Medium (>500 MB to 3 GB): five.
+          # Small files (<=500 MB): ten. Unknown-size files are handled alone.
+          batches = []
+          large = [x for x in items if x["size"] is not None and x["size"] > LARGE_LIMIT]
+          medium = [x for x in items if x["size"] is not None and SMALL_LIMIT < x["size"] <= LARGE_LIMIT]
+          small = [x for x in items if x["size"] is not None and x["size"] <= SMALL_LIMIT]
+          unknown = [x for x in items if x["size"] is None]
+          for group, width in ((large, 1), (medium, 5), (small, 10), (unknown, 1)):
+              for start in range(0, len(group), width):
+                  batches.append(group[start:start + width])
+          
+          summary = []
+          for batch_no, batch in enumerate(batches, 1):
+              batch_size = len(batch)
+              print(f"\n=== Batch {batch_no}/{len(batches)}: {batch_size} file(s) ===")
+              with tempfile.TemporaryDirectory(prefix="uploader-v5-") as temp_dir:
+                  temp = Path(temp_dir)
+                  def download(item):
+                      local = temp / f'{item["index"]:02d}-{item["name"]}'
+                      req = urllib.request.Request(item["url"], headers={"User-Agent": "Uploader-V5/5.4"})
+                      try:
+                          with urllib.request.urlopen(req, timeout=90) as response, open(local, "wb") as out:
+                              shutil.copyfileobj(response, out, length=1024 * 1024)
+                      except Exception:
+                          local.unlink(missing_ok=True)
+                          raise
+                      return item, local
+          
+                  downloaded = []
+                  with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as pool:
+                      futures = [pool.submit(download, item) for item in batch]
+                      for future in concurrent.futures.as_completed(futures):
+                          downloaded.append(future.result())
+          
+                  # Upload every completed download, then the temporary directory is
+                  # removed automatically before the next batch starts.
+                  for item, local in sorted(downloaded, key=lambda pair: pair[0]["index"]):
+                      target = f'{REMOTE}:Downloads/{item["name"]}'
+                      print(f'Uploading {item["name"]} -> {target}')
+                      subprocess.run([
+                          "rclone", "copyto", str(local), target,
+                          "--drive-chunk-size", "64M", "--stats", "10s", "--stats-one-line"
+                      ], check=True)
+                      summary.append((item["name"], target, item["size"]))
+                      print(f"Uploaded: {item['name']}")
+                  print(f"Batch {batch_no} uploaded; temporary files will now be deleted.")
+          
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("## Uploader V5 — Transfer results\n\n")
+              out.write(f"**Files uploaded:** {len(summary)}\n\n")
+              out.write(f"**Destination:** `{REMOTE}:Downloads/`\n\n")
+              out.write("**Concurrency:** >3 GB: 1; >500 MB–3 GB: 5; ≤500 MB: 10. Unknown sizes: 1.\n\n")
+              out.write("**Sharing:** Private — no public Drive links or permissions are created.\n\n")
+              for name, target, size in summary:
+                  size_text = f"{size / 1_000_000:.1f} MB" if size is not None else "unknown size"
+                  out.write(f"- **{name}** ({size_text}) → `{target}`\n")
+          print(f"\nSuccessfully uploaded {len(summary)} file(s).")
+          PY
