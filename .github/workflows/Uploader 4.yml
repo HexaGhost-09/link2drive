@@ -79,15 +79,10 @@ jobs:
           fi
           grep -vE '^[[:space:]]*(#|$)' /tmp/new-links.txt > /tmp/filtered-links.txt || true
           mv /tmp/filtered-links.txt /tmp/new-links.txt
-          {
-            echo "urls<<LINKS_EOF"
-            cat /tmp/new-links.txt
-            echo "LINKS_EOF"
-          } >> "$GITHUB_OUTPUT"
 
       # Keep the original single magnet/direct-URL workflow intact.
       - name: Download Single Item
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' }}
         shell: bash
         env:
           INPUT: ${{ inputs.magnet_link }}
@@ -124,26 +119,26 @@ jobs:
           echo "UPLOAD_NAME=$NAME_NO_EXT" >> "$GITHUB_ENV"
 
       - name: Show Downloaded Files
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' }}
         run: |
           echo "Downloaded files:"
           ls -lah downloads
           echo "Upload name will be: $UPLOAD_NAME"
 
       - name: Compress Files (Optional)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' && inputs.zip_mode == 'zip' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && inputs.zip_mode == 'zip' }}
         run: |
           mkdir -p upload
           zip -r "upload/${UPLOAD_NAME}.zip" downloads
 
       - name: Prepare Normal Upload
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' && inputs.zip_mode == 'normal' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && inputs.zip_mode == 'normal' }}
         run: |
           mkdir -p upload
           cp -r downloads/. upload/
 
       - name: Upload Single Item via Rclone
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' }}
         env:
           REMOTE_NAME: ${{ inputs.remote_name }}
         run: |
@@ -154,10 +149,9 @@ jobs:
       # Multiple direct links: probe sizes, download in safe concurrent batches,
       # upload each batch, then delete its local files before the next batch.
       - name: Multiple Links — Smart Batch Download, Upload & Cleanup
-        if: ${{ steps.link_input.outputs.urls != '' }}
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.magnet_link == '') }}
         shell: bash
         env:
-          DIRECT_URLS: ${{ steps.link_input.outputs.urls }}
           REMOTE_NAME: ${{ inputs.remote_name }}
         run: |
           set -euo pipefail
@@ -172,7 +166,7 @@ jobs:
           from pathlib import Path
           from urllib.parse import unquote, urlparse
 
-          raw = os.environ["DIRECT_URLS"].replace("\\r", "")
+          raw = Path("/tmp/new-links.txt").read_text(encoding="utf-8").replace("\\r", "")
           urls = [line.strip() for line in raw.splitlines()
                   if line.strip() and not line.lstrip().startswith("#")]
           if not urls:
@@ -281,7 +275,7 @@ jobs:
           PY
 
       - name: Share & Shorten Link
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' && inputs.link_sharing == 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && inputs.link_sharing == 'true' }}
         env:
           REMOTE_NAME: ${{ inputs.remote_name }}
           ZIP_MODE: ${{ inputs.zip_mode }}
