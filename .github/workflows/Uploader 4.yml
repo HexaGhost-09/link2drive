@@ -190,9 +190,20 @@ jobs:
           unknown = [x for x in items if x["size"] is None]
 
           batches = []
+          MAX_BATCH_BYTES = 8_000_000_000  # Keep staged batches within runner disk capacity.
           for group, width in ((large, 1), (medium, 5), (small, 10), (unknown, 1)):
-              for start in range(0, len(group), width):
-                  batches.append(group[start:start + width])
+              current = []
+              current_bytes = 0
+              for item in group:
+                  item_size = item["size"] or 0
+                  if current and (len(current) >= width or current_bytes + item_size > MAX_BATCH_BYTES):
+                      batches.append(current)
+                      current = []
+                      current_bytes = 0
+                  current.append(item)
+                  current_bytes += item_size
+              if current:
+                  batches.append(current)
 
           remote = os.environ["REMOTE_NAME"]
           if not remote or ":" in remote or "/" in remote:
