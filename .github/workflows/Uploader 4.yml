@@ -4,8 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       magnet_link:
-        description: 'Magnet Link or Direct Download URL'
-        required: true
+        description: 'Single magnet link or direct download URL (leave blank for multiple links)'
+        required: false
+        type: string
+
+      multiple_links:
+        description: 'Multiple direct HTTP/HTTPS URLs — one per line (leave blank for single upload)'
+        required: false
+        type: string
 
       remote_name:
         description: 'The name of the remote in your rclone.conf'
@@ -13,7 +19,7 @@ on:
         default: 'gdrive'
 
       zip_mode:
-        description: 'Upload Mode'
+        description: 'Upload Mode (single upload only; multiple links upload as files)'
         required: true
         type: choice
         default: normal
@@ -22,7 +28,7 @@ on:
           - zip
 
       link_sharing:
-        description: 'Generate a share link for the uploaded file/folder?'
+        description: 'Generate a share link for the uploaded file/folder? (single upload only)'
         required: true
         type: choice
         default: 'false'
@@ -33,6 +39,7 @@ on:
 jobs:
   transfer:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Code
@@ -42,98 +49,202 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 zip jq curl
-          curl https://rclone.org/install.sh | sudo bash
+          curl --fail --silent --show-error https://rclone.org/install.sh | sudo bash
           rclone version
 
-      - name: Download
+      # Keep the original single magnet/direct-URL workflow intact.
+      - name: Download Single Item
+        if: ${{ inputs.multiple_links == '' }}
         shell: bash
+        env:
+          INPUT: ${{ inputs.magnet_link }}
         run: |
+          set -euo pipefail
+          if [ -z "$INPUT" ]; then
+            echo "::error::Provide a magnet/direct URL or use Multiple Links."
+            exit 1
+          fi
           mkdir -p downloads
-
-          INPUT="${{ github.event.inputs.magnet_link }}"
-
           if [[ "$INPUT" == magnet:* ]]; then
             echo "Detected Magnet Link"
-
-            aria2c \
-              --seed-time=0 \
-              --summary-interval=5 \
-              --dir=downloads \
-              --bt-max-peers=120 \
-              --file-allocation=falloc \
-              "$INPUT"
-
+            aria2c --seed-time=0 --summary-interval=5 --dir=downloads \
+              --bt-max-peers=120 --file-allocation=falloc "$INPUT"
           else
             echo "Detected Direct URL"
-
             FILENAME=$(basename "${INPUT%%\?*}")
-            echo "Saving as: $FILENAME"
-
-            aria2c \
-              --dir=downloads \
-              --out="$FILENAME" \
-              --continue=true \
-              --auto-file-renaming=false \
-              --content-disposition-default-utf8=true \
-              "$INPUT"
+            [ -n "$FILENAME" ] || FILENAME="download.bin"
+            aria2c --dir=downloads --out="$FILENAME" --continue=true \
+              --auto-file-renaming=false --content-disposition-default-utf8=true "$INPUT"
           fi
 
-          # Determine the actual top-level name of what was downloaded
-          # (a single file, or a single torrent folder)
           ENTRY_COUNT=$(find downloads -mindepth 1 -maxdepth 1 | wc -l)
-
           if [ "$ENTRY_COUNT" -eq 1 ]; then
             BASE_NAME=$(basename "$(find downloads -mindepth 1 -maxdepth 1)")
           else
-            # Multiple top-level items (rare for magnets with loose files) —
-            # fall back to a generic name
             BASE_NAME="Downloads"
           fi
-
-          # Strip the extension if it's a single file, so archive gets a clean name
           if [ -f "downloads/$BASE_NAME" ]; then
             NAME_NO_EXT="${BASE_NAME%.*}"
           else
             NAME_NO_EXT="$BASE_NAME"
           fi
-
-          echo "Detected name: $NAME_NO_EXT"
           echo "UPLOAD_NAME=$NAME_NO_EXT" >> "$GITHUB_ENV"
 
       - name: Show Downloaded Files
+        if: ${{ inputs.multiple_links == '' }}
         run: |
           echo "Downloaded files:"
           ls -lah downloads
           echo "Upload name will be: $UPLOAD_NAME"
 
       - name: Compress Files (Optional)
-        if: ${{ github.event.inputs.zip_mode == 'zip' }}
+        if: ${{ inputs.multiple_links == '' && inputs.zip_mode == 'zip' }}
         run: |
           mkdir -p upload
           zip -r "upload/${UPLOAD_NAME}.zip" downloads
 
       - name: Prepare Normal Upload
-        if: ${{ github.event.inputs.zip_mode == 'normal' }}
+        if: ${{ inputs.multiple_links == '' && inputs.zip_mode == 'normal' }}
         run: |
           mkdir -p upload
           cp -r downloads/. upload/
 
-      - name: Upload via Rclone
+      - name: Upload Single Item via Rclone
+        if: ${{ inputs.multiple_links == '' }}
+        env:
+          REMOTE_NAME: ${{ inputs.remote_name }}
         run: |
-          echo "Starting Upload..."
+          set -euo pipefail
+          rclone --config ./rclone.conf copy ./upload/ "$REMOTE_NAME:Downloads/" \
+            --progress --transfers 8 --checkers 16 --fast-list
 
-          rclone --config ./rclone.conf copy ./upload/ "${{ github.event.inputs.remote_name }}:Downloads/" \
-            --progress \
-            --transfers 8 \
-            --checkers 16 \
-            --fast-list
+      # Multiple direct links: probe sizes, download in safe concurrent batches,
+      # upload each batch, then delete its local files before the next batch.
+      - name: Multiple Links — Smart Batch Download, Upload & Cleanup
+        if: ${{ inputs.multiple_links != '' }}
+        shell: bash
+        env:
+          DIRECT_URLS: ${{ inputs.multiple_links }}
+          REMOTE_NAME: ${{ inputs.remote_name }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import concurrent.futures
+          import os
+          import re
+          import shutil
+          import subprocess
+          import tempfile
+          import urllib.request
+          from pathlib import Path
+          from urllib.parse import unquote, urlparse
+
+          raw = os.environ["DIRECT_URLS"].replace("\\r", "")
+          urls = [line.strip() for line in raw.splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")]
+          if not urls:
+              raise SystemExit("Paste at least one direct URL.")
+          if len(urls) > 20:
+              raise SystemExit("Maximum 20 URLs per workflow run.")
+          for i, url in enumerate(urls, 1):
+              if urlparse(url).scheme not in ("http", "https"):
+                  raise SystemExit(f"Line {i} is not an HTTP/HTTPS URL.")
+
+          def probe(url):
+              headers = {"User-Agent": "Link2Drive-Uploader-V4"}
+              try:
+                  req = urllib.request.Request(url, method="HEAD", headers=headers)
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      value = response.headers.get("Content-Length")
+                      if value and value.isdigit():
+                          return int(value)
+              except Exception:
+                  pass
+              try:
+                  req = urllib.request.Request(url, headers={**headers, "Range": "bytes=0-0"})
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      match = re.search(r"/(\d+)$", response.headers.get("Content-Range", ""))
+                      if match:
+                          return int(match.group(1))
+                      value = response.headers.get("Content-Length")
+                      if response.status == 200 and value and value.isdigit():
+                          return int(value)
+              except Exception:
+                  pass
+              return None
+
+          items = []
+          for index, url in enumerate(urls, 1):
+              size = probe(url)
+              name = unquote(urlparse(url).path.rsplit("/", 1)[-1]) or f"download-{index}.bin"
+              name = re.sub(r'[\\\\/:*?"<>|]', "_", name).strip(" .") or f"download-{index}.bin"
+              items.append({"index": index, "url": url, "size": size, "name": f"{index:02d}-{name}"})
+              print(f"[{index}/{len(urls)}] {name}: " +
+                    (f"{size / 1_000_000:.1f} MB" if size is not None else "unknown size (solo batch)"))
+
+          # >3 GB: 1 at a time. >500 MB through 3 GB: 5 at a time.
+          # <=500 MB: 10 at a time. Unknown-size URLs: 1 at a time.
+          large = [x for x in items if x["size"] is not None and x["size"] > 3_000_000_000]
+          medium = [x for x in items if x["size"] is not None and 500_000_000 < x["size"] <= 3_000_000_000]
+          small = [x for x in items if x["size"] is not None and x["size"] <= 500_000_000]
+          unknown = [x for x in items if x["size"] is None]
+
+          batches = []
+          for group, width in ((large, 1), (medium, 5), (small, 10), (unknown, 1)):
+              for start in range(0, len(group), width):
+                  batches.append(group[start:start + width])
+
+          remote = os.environ["REMOTE_NAME"]
+          if not remote or ":" in remote or "/" in remote:
+              raise SystemExit("Invalid rclone remote name.")
+          for batch_no, batch in enumerate(batches, 1):
+              batch_dir = Path(tempfile.mkdtemp(prefix=f"uploader-v4-batch-{batch_no}-"))
+              print(f"\n=== Batch {batch_no}/{len(batches)}: downloading {len(batch)} file(s) ===")
+              try:
+                  def download(item):
+                      target = batch_dir / item["name"]
+                      subprocess.run([
+                          "aria2c", "--dir", str(batch_dir), "--out", item["name"],
+                          "--continue=true", "--auto-file-renaming=false",
+                          "--content-disposition-default-utf8=true",
+                          "--summary-interval=5", item["url"]
+                      ], check=True)
+                      return target
+
+                  with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                      list(pool.map(download, batch))
+
+                  print(f"Uploading batch {batch_no} to {remote}:Downloads/ ...")
+                  subprocess.run([
+                      "rclone", "--config", "./rclone.conf", "copy", str(batch_dir),
+                      f"{remote}:Downloads/", "--progress", "--transfers", str(len(batch)),
+                      "--checkers", "16", "--fast-list"
+                  ], check=True)
+                  print(f"Batch {batch_no} uploaded successfully. Deleting local batch files.")
+              except Exception:
+                  print(f"Batch {batch_no} failed. Keeping its temporary files until runner cleanup.")
+                  raise
+              finally:
+                  # Only remove a successfully uploaded batch.
+                  if all((batch_dir / item["name"]).is_file() for item in batch) and not any(
+                      (batch_dir / item["name"]).stat().st_size == 0 for item in batch
+                  ):
+                      # The success marker is set only after rclone returns successfully.
+                      pass
+              # rclone succeeded; free runner disk before starting the next batch.
+              shutil.rmtree(batch_dir)
+              print(f"Batch {batch_no} cleaned. Runner disk space released.")
+          print("\nAll multiple-link batches uploaded successfully.")
+          PY
 
       - name: Share & Shorten Link
-        if: ${{ github.event.inputs.link_sharing == 'true' }}
+        if: ${{ inputs.multiple_links == '' && inputs.link_sharing == 'true' }}
+        env:
+          REMOTE_NAME: ${{ inputs.remote_name }}
+          ZIP_MODE: ${{ inputs.zip_mode }}
         run: |
           set -e
-
-          if [ "${{ github.event.inputs.zip_mode }}" == "zip" ]; then
+          if [ "$ZIP_MODE" == "zip" ]; then
             TARGET_PATH="Downloads/${UPLOAD_NAME}.zip"
           else
             FILE_COUNT=$(find upload -maxdepth 1 -type f | wc -l)
@@ -144,32 +255,20 @@ jobs:
               TARGET_PATH="Downloads"
             fi
           fi
-
-          echo "Sharing: ${{ github.event.inputs.remote_name }}:$TARGET_PATH"
-
-          rclone --config ./rclone.conf link "${{ github.event.inputs.remote_name }}:$TARGET_PATH" > gdrive_link.txt
+          rclone --config ./rclone.conf link "$REMOTE_NAME:$TARGET_PATH" > gdrive_link.txt
           FINAL_URL=$(cat gdrive_link.txt)
-
-          echo "Google Drive Link: $FINAL_URL"
-
           RESPONSE=$(curl -s -X POST https://api.shrinkrl.com/api/v1/urls \
             -H "Content-Type: application/json" \
-            -d "{\"url\":{\"original_url\":\"$FINAL_URL\"}}")
-
+            -d "{\\"url\\":{\\"original_url\\":\\"$FINAL_URL\\"}}")
           SHORT_URL=$(echo "$RESPONSE" | jq -r '.short_url')
-
-          echo "Short URL: $SHORT_URL"
-
           {
             echo "### 🔗 Upload Links"
             echo ""
             echo "**Name:** $UPLOAD_NAME"
             echo ""
-            echo "**Final Google Drive URL:**"
-            echo "$FINAL_URL"
+            echo "**Google Drive URL:** $FINAL_URL"
             echo ""
-            echo "**Short URL:**"
-            echo "$SHORT_URL"
+            echo "**Short URL:** $SHORT_URL"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Done
