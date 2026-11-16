@@ -1,10 +1,10 @@
-name: Uploader V5 - Direct URL Streaming
+name: Uploader V5 - Multiple Direct URLs
 
 on:
   workflow_dispatch:
     inputs:
-      direct_url:
-        description: "Direct HTTP/HTTPS download URL"
+      direct_urls:
+        description: "Paste one or more direct HTTP/HTTPS URLs (one URL per line)"
         required: true
         type: string
       remote_name:
@@ -13,17 +13,9 @@ on:
         default: "gdrive"
         type: string
       filename:
-        description: "Optional output filename (leave empty to detect automatically)"
+        description: "Optional filename override (only for a single URL; otherwise leave empty)"
         required: false
         type: string
-      link_sharing:
-        description: "Generate a share link after upload?"
-        required: true
-        type: choice
-        default: "false"
-        options:
-          - "false"
-          - "true"
 
 permissions:
   contents: read
@@ -67,44 +59,82 @@ jobs:
       - name: Build Rust streaming uploader
         run: cargo build --release --manifest-path uploader-v5/Cargo.toml
 
-      - name: Stream direct URL to cloud remote
-        id: upload
+      - name: Upload all URLs privately
         env:
-          DIRECT_URL: ${{ inputs.direct_url }}
+          DIRECT_URLS: ${{ inputs.direct_urls }}
           REMOTE_NAME: ${{ inputs.remote_name }}
           OUTPUT_FILENAME: ${{ inputs.filename }}
+        shell: bash
         run: |
           set -euo pipefail
-          ./uploader-v5/target/release/link2drive-stream \
-            "$DIRECT_URL" "$REMOTE_NAME" "$OUTPUT_FILENAME"
 
-      - name: Generate share link
-        if: ${{ inputs.link_sharing == 'true' }}
-        env:
-          TARGET: ${{ steps.upload.outputs.target }}
-          FILENAME: ${{ steps.upload.outputs.filename }}
-        run: |
-          set -euo pipefail
-          LINK="$(rclone link "$TARGET")"
+          URLS_FILE="$RUNNER_TEMP/direct-urls.txt"
+          printf '%s' "$DIRECT_URLS" | tr -d '\r' > "$URLS_FILE"
+
+          mapfile -t URL_LIST < <(sed '/^[[:space:]]*$/d; /^[[:space:]]*#/d' "$URLS_FILE")
+          URL_COUNT="${#URL_LIST[@]}"
+
+          if [ "$URL_COUNT" -eq 0 ]; then
+            echo "::error::Paste at least one direct URL, with one URL per line."
+            exit 1
+          fi
+
+          if [ "$URL_COUNT" -gt 20 ]; then
+            echo "::error::A maximum of 20 URLs is allowed per run."
+            exit 1
+          fi
+
+          if [ -n "${OUTPUT_FILENAME//[[:space:]]/}" ] && [ "$URL_COUNT" -ne 1 ]; then
+            echo "::error::Filename override is only supported for a single URL. Leave it empty for multiple URLs."
+            exit 1
+          fi
+
           {
-            echo "### Upload complete"
+            echo "## Uploader V5 — Upload results"
             echo ""
-            echo "**File:** $FILENAME"
+            echo "**Files queued:** $URL_COUNT"
+            echo "**Destination:** ${REMOTE_NAME}:Downloads/"
+            echo "**Sharing:** Private — no public Drive permissions or share links are created."
             echo ""
-            echo "**Google Drive link:**"
-            echo "$LINK"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload summary
-        if: ${{ inputs.link_sharing != 'true' }}
-        env:
-          TARGET: ${{ steps.upload.outputs.target }}
-          FILENAME: ${{ steps.upload.outputs.filename }}
-        run: |
-          {
-            echo "### Upload complete"
-            echo ""
-            echo "**File:** $FILENAME"
-            echo ""
-            echo "**Remote path:** `$TARGET`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          INDEX=0
+          for URL in "${URL_LIST[@]}"; do
+            URL="$(printf '%s' "$URL" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+            case "$URL" in
+              https://*|http://*) ;;
+              *)
+                echo "::error::Line $((INDEX + 1)) is not an HTTP/HTTPS URL."
+                exit 1
+                ;;
+            esac
+
+            echo "::group::Uploading $((INDEX + 1))/$URL_COUNT"
+            echo "Source: $URL"
+            OUTPUT_FILE="$RUNNER_TEMP/uploader-output-$INDEX"
+            if [ -n "$OUTPUT_FILENAME" ]; then
+              GITHUB_OUTPUT="$OUTPUT_FILE" ./uploader-v5/target/release/link2drive-stream "$URL" "$REMOTE_NAME" "$OUTPUT_FILENAME"
+            else
+              GITHUB_OUTPUT="$OUTPUT_FILE" ./uploader-v5/target/release/link2drive-stream "$URL" "$REMOTE_NAME"
+            fi
+
+            FILE_NAME="$(sed -n 's/^filename=//p' "$OUTPUT_FILE" | tail -n 1)"
+            TARGET="$(sed -n 's/^target=//p' "$OUTPUT_FILE" | tail -n 1)"
+            if [ -z "$FILE_NAME" ] || [ -z "$TARGET" ]; then
+              echo "::error::Uploader did not return the uploaded file details."
+              exit 1
+            fi
+
+            {
+              echo "### $((INDEX + 1)). $FILE_NAME"
+              echo ""
+              echo "- **Remote path:** `$TARGET`"
+              echo "- **Access:** Private (no public link created)"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo "::endgroup::"
+            INDEX=$((INDEX + 1))
+          done
+
+          echo "Successfully uploaded $INDEX file(s)."
