@@ -77,6 +77,8 @@ jobs:
           else
             : > /tmp/new-links.txt
           fi
+          grep -vE '^[[:space:]]*(#|$)' /tmp/new-links.txt > /tmp/filtered-links.txt || true
+          mv /tmp/filtered-links.txt /tmp/new-links.txt
           {
             echo "urls<<LINKS_EOF"
             cat /tmp/new-links.txt
