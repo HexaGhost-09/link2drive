@@ -1,15 +1,15 @@
 name: Uploader V4
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'links.txt'
   workflow_dispatch:
     inputs:
       magnet_link:
-        description: 'Single magnet link or direct download URL (leave blank for multiple links)'
-        required: false
-        type: string
-
-      multiple_links:
-        description: 'Multiple direct HTTP/HTTPS URLs — one per line (leave blank for single upload)'
+        description: 'Optional single magnet link or direct download URL. Leave blank to process links.txt.'
         required: false
         type: string
 
@@ -19,7 +19,7 @@ on:
         default: 'gdrive'
 
       zip_mode:
-        description: 'Upload Mode (single upload only; multiple links upload as files)'
+        description: 'Upload Mode (single upload only; links.txt uploads as files)'
         required: true
         type: choice
         default: normal
@@ -52,9 +52,38 @@ jobs:
           curl --fail --silent --show-error https://rclone.org/install.sh | sudo bash
           rclone version
 
+      # Process only newly added lines on links.txt pushes to avoid repeating old downloads.
+      - name: Load Links from links.txt
+        id: link_input
+        shell: bash
+        env:
+          SINGLE_INPUT: ${{ inputs.magnet_link }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            BEFORE="$(jq -r '.before' "$GITHUB_EVENT_PATH")"
+            if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              git show "$GITHUB_SHA:links.txt" > /tmp/new-links.txt
+            else
+              git diff --unified=0 "$BEFORE" "$GITHUB_SHA" -- links.txt | \
+                sed -n '/^+++ /d; /^+[^+]/s/^+//p' > /tmp/new-links.txt
+            fi
+          elif [ -n "$SINGLE_INPUT" ]; then
+            : > /tmp/new-links.txt
+          elif [ -f links.txt ]; then
+            cp links.txt /tmp/new-links.txt
+          else
+            : > /tmp/new-links.txt
+          fi
+          {
+            echo "urls<<LINKS_EOF"
+            cat /tmp/new-links.txt
+            echo "LINKS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       # Keep the original single magnet/direct-URL workflow intact.
       - name: Download Single Item
-        if: ${{ inputs.multiple_links == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' }}
         shell: bash
         env:
           INPUT: ${{ inputs.magnet_link }}
@@ -91,26 +120,26 @@ jobs:
           echo "UPLOAD_NAME=$NAME_NO_EXT" >> "$GITHUB_ENV"
 
       - name: Show Downloaded Files
-        if: ${{ inputs.multiple_links == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' }}
         run: |
           echo "Downloaded files:"
           ls -lah downloads
           echo "Upload name will be: $UPLOAD_NAME"
 
       - name: Compress Files (Optional)
-        if: ${{ inputs.multiple_links == '' && inputs.zip_mode == 'zip' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' && inputs.zip_mode == 'zip' }}
         run: |
           mkdir -p upload
           zip -r "upload/${UPLOAD_NAME}.zip" downloads
 
       - name: Prepare Normal Upload
-        if: ${{ inputs.multiple_links == '' && inputs.zip_mode == 'normal' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' && inputs.zip_mode == 'normal' }}
         run: |
           mkdir -p upload
           cp -r downloads/. upload/
 
       - name: Upload Single Item via Rclone
-        if: ${{ inputs.multiple_links == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' }}
         env:
           REMOTE_NAME: ${{ inputs.remote_name }}
         run: |
@@ -121,10 +150,10 @@ jobs:
       # Multiple direct links: probe sizes, download in safe concurrent batches,
       # upload each batch, then delete its local files before the next batch.
       - name: Multiple Links — Smart Batch Download, Upload & Cleanup
-        if: ${{ inputs.multiple_links != '' }}
+        if: ${{ steps.link_input.outputs.urls != '' }}
         shell: bash
         env:
-          DIRECT_URLS: ${{ inputs.multiple_links }}
+          DIRECT_URLS: ${{ steps.link_input.outputs.urls }}
           REMOTE_NAME: ${{ inputs.remote_name }}
         run: |
           set -euo pipefail
@@ -249,7 +278,7 @@ jobs:
           PY
 
       - name: Share & Shorten Link
-        if: ${{ inputs.multiple_links == '' && inputs.link_sharing == 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && steps.link_input.outputs.urls == '' && inputs.link_sharing == 'true' }}
         env:
           REMOTE_NAME: ${{ inputs.remote_name }}
           ZIP_MODE: ${{ inputs.zip_mode }}
