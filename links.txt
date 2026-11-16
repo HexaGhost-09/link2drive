@@ -1,0 +1,1 @@
+# Add one direct HTTP/HTTPS download URL per line. New lines trigger Uploader 4 automatically.
