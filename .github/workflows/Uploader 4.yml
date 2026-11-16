@@ -177,8 +177,7 @@ jobs:
                   if line.strip() and not line.lstrip().startswith("#")]
           if not urls:
               raise SystemExit("Paste at least one direct URL.")
-          if len(urls) > 20:
-              raise SystemExit("Maximum 20 URLs per workflow run.")
+          print(f"Loaded {len(urls)} URL(s) from links.txt.")
           for i, url in enumerate(urls, 1):
               if urlparse(url).scheme not in ("http", "https"):
                   raise SystemExit(f"Line {i} is not an HTTP/HTTPS URL.")
