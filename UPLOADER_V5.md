@@ -11,7 +11,7 @@ Paste up to 20 direct HTTP/HTTPS download URLs into the **Multiple Links** field
 | 500 MB or smaller | 10 |
 | Size cannot be determined | 1 |
 
-Sizes use decimal bytes (1 GB = 1,000,000,000 bytes). The workflow checks file size with HTTP HEAD and falls back to a one-byte Range request. If the server does not reveal its size, the file is processed alone to reduce disk-space risk.
+Sizes use decimal bytes (1 GB = 1,000,000,000 bytes). The workflow checks file size with HTTP HEAD and falls back to a one-byte Range request. If the server does not reveal its size, the file is processed alone to reduce disk-space risk. Each staged batch is also capped at 8 GB total, so a five-file medium batch may be split into smaller groups when needed to protect runner disk space.
 
 ## Batch lifecycle
 
