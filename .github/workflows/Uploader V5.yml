@@ -143,9 +143,20 @@ jobs:
           medium = [x for x in items if x["size"] is not None and SMALL_LIMIT < x["size"] <= LARGE_LIMIT]
           small = [x for x in items if x["size"] is not None and x["size"] <= SMALL_LIMIT]
           unknown = [x for x in items if x["size"] is None]
+          MAX_BATCH_BYTES = 8_000_000_000  # Protect runner disk space.
           for group, width in ((large, 1), (medium, 5), (small, 10), (unknown, 1)):
-              for start in range(0, len(group), width):
-                  batches.append(group[start:start + width])
+              current = []
+              current_bytes = 0
+              for item in group:
+                  item_bytes = item["size"] or 0
+                  if current and (len(current) >= width or current_bytes + item_bytes > MAX_BATCH_BYTES):
+                      batches.append(current)
+                      current = []
+                      current_bytes = 0
+                  current.append(item)
+                  current_bytes += item_bytes
+              if current:
+                  batches.append(current)
           
           summary = []
           for batch_no, batch in enumerate(batches, 1):
@@ -187,7 +198,7 @@ jobs:
               out.write("## Uploader V5 — Transfer results\n\n")
               out.write(f"**Files uploaded:** {len(summary)}\n\n")
               out.write(f"**Destination:** `{REMOTE}:Downloads/`\n\n")
-              out.write("**Concurrency:** >3 GB: 1; >500 MB–3 GB: 5; ≤500 MB: 10. Unknown sizes: 1.\n\n")
+              out.write("**Concurrency (maximum):** >3 GB: 1; >500 MB–3 GB: 5; ≤500 MB: 10. Unknown sizes: 1. Batches are also capped at 8 GB total staged data.\n\n")
               out.write("**Sharing:** Private — no public Drive links or permissions are created.\n\n")
               for name, target, size in summary:
                   size_text = f"{size / 1_000_000:.1f} MB" if size is not None else "unknown size"
