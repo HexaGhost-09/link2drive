@@ -1,40 +1,51 @@
-# Uploader V5.3 — Multiple Direct URL Streaming
+# Uploader V5.4 — Smart Batch Downloads
 
-Uploader V5 accepts multiple direct HTTP/HTTPS download URLs in one workflow run. Paste the URLs into the **Multiple Links** field, one URL per line. Files are streamed sequentially to the selected rclone remote without staging complete files on the GitHub runner.
+Paste up to 20 direct HTTP/HTTPS download URLs into the **Multiple Links** field, one URL per line. V5 checks each source's size, downloads files in size-based concurrent batches, uploads each batch to the selected rclone remote, and deletes the batch's local temporary files before starting the next batch.
 
-## Features
+## Adaptive download limits
 
-- **Multiple Links as Text:** paste up to 20 direct URLs in one run, one URL per line.
-- Streams each source response through the Rust uploader into `rclone rcat`.
-- Uses source Content-Length when available.
-- Detects filenames from Content-Disposition, falling back to the URL path.
-- Supports an optional filename override when uploading a single URL.
-- Attempts up to five HTTP Range resume retries when the source supports Range requests.
-- Uploads to `<remote>:Downloads/<filename>`.
+| Detected file size | Simultaneous downloads |
+|---|---:|
+| Over 3 GB | 1 |
+| Over 500 MB up to 3 GB | 5 |
+| 500 MB or smaller | 10 |
+| Size cannot be determined | 1 |
+
+Sizes use decimal bytes (1 GB = 1,000,000,000 bytes). The workflow checks file size with HTTP HEAD and falls back to a one-byte Range request. If the server does not reveal its size, the file is processed alone to reduce disk-space risk.
+
+## Batch lifecycle
+
+1. The workflow probes the URLs and groups files by size.
+2. It downloads up to the allowed number of files concurrently.
+3. It uploads the downloaded files to `<remote>:Downloads/` using rclone.
+4. After every file in that batch uploads successfully, the temporary batch directory is deleted.
+5. The next batch begins.
+
+If a download or upload fails, the workflow stops rather than deleting a batch that has not uploaded successfully. GitHub Actions also removes the runner workspace when the job ends.
 
 ## Google Drive privacy
 
-Uploads are **private by default**. The V5 workflow does not run `rclone link`, create public share links, or change Google Drive permissions. A file remains subject to the permissions of the destination folder and the Google account. If you want to share a file, change its access manually in Google Drive after upload.
+Uploads are **private by default**. The workflow does not run `rclone link`, create public share links, or change Google Drive permissions. Files inherit the permissions of the destination folder and Google account. Share them manually in Google Drive if needed.
 
 ## One-time setup
 
-1. Rotate credentials in any previously committed `rclone.conf`; exposed credentials/tokens must be revoked or refreshed.
+1. Rotate credentials in any previously committed `rclone.conf`; revoke or refresh exposed credentials/tokens.
 2. Create a fresh rclone configuration locally with the remote you want to use (normally `gdrive`).
 3. In GitHub, open **Settings → Secrets and variables → Actions → New repository secret**.
 4. Add a repository secret named **`RCLONE_CONFIG_CONTENT`** containing the complete fresh configuration.
-5. Open **Actions → Uploader V5 - Multiple Direct URLs → Run workflow**.
-6. Paste one or more direct URLs into **Multiple Links**, each on its own line.
+5. Open **Actions → Uploader V5 - Smart Batch Downloads → Run workflow**.
+6. Paste one to 20 direct file URLs into **Multiple Links**, each on its own line.
 
 ## Inputs
 
 - `direct_urls`: one to 20 direct HTTP/HTTPS file URLs, one per line. Blank lines and lines beginning with `#` are ignored.
 - `remote_name`: rclone remote name from the secret; defaults to `gdrive`.
-- `filename`: optional override for a single URL only. Leave blank for multiple URLs.
 
 ## Limitations
 
 - URLs must point directly to downloadable files, not webpages with download buttons.
 - Sources requiring browser cookies or authentication not embedded in the URL may fail.
-- Automatic resume requires HTTP Range support.
-- Transfers run sequentially and share the workflow's six-hour job limit.
-- ZIP and torrent/magnet modes are not included in this V5 workflow.
+- Size detection depends on the source server providing Content-Length or Content-Range. Unknown-size files are downloaded one at a time.
+- Duplicate filenames may overwrite each other in the destination folder; rename source files or separate runs to avoid collisions.
+- Transfers share the GitHub Actions six-hour job limit.
+- ZIP and torrent/magnet modes are not included.
