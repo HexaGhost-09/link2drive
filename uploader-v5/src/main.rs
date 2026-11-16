@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     }
 
     let client = reqwest::Client::builder()
-        .user_agent("link2drive-uploader/5.2")
+        .user_agent("link2drive-uploader/5.3")
         .connect_timeout(Duration::from_secs(45))
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()?;
