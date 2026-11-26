@@ -117,7 +117,7 @@ jobs:
           from urllib.parse import unquote, urlparse
           url = sys.argv[1]
           name = unquote(urlparse(url).path.rsplit('/', 1)[-1])
-          name = re.sub(r'[\\\\/:*?"<>|\\x00-\\x1f]', '_', name).strip(' .')
+          name = ''.join('_' if ord(ch) < 32 or ch in '/'+chr(92)+':*?"<>|' else ch for ch in name).strip(' .')
           if not name or len(name.encode('utf-8')) > 180:
               name = f"download-{hashlib.sha256(url.encode()).hexdigest()[:12]}.bin"
           print(name)
@@ -162,7 +162,7 @@ jobs:
       - name: Upload Single Item via Rclone
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' }}
         env:
-          REMOTE_NAME: ${{ inputs.remote_name }}
+          REMOTE_NAME: ${{ inputs.remote_name || 'gdrive' }}
         run: |
           set -euo pipefail
           rclone --config ./rclone.conf copy ./upload/ "$REMOTE_NAME:Downloads/" \
@@ -226,7 +226,7 @@ jobs:
           for index, url in enumerate(urls, 1):
               size = probe(url)
               name = unquote(urlparse(url).path.rsplit("/", 1)[-1]) or f"download-{index}.bin"
-              name = re.sub(r'[\\\\/:*?"<>|\\x00-\\x1f]', "_", name).strip(" .") or f"download-{index}.bin"
+              name = ''.join('_' if ord(ch) < 32 or ch in '/'+chr(92)+':*?"<>|' else ch for ch in name).strip(" .") or f"download-{index}.bin"
               if len(name.encode("utf-8")) > 180:
                   name = f"download-{index}-{hashlib.sha256(url.encode()).hexdigest()[:10]}.bin"
               items.append({"index": index, "url": url, "size": size, "name": f"{index:02d}-{name}"})
