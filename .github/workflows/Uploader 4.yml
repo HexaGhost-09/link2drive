@@ -174,7 +174,7 @@ jobs:
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.magnet_link == '') }}
         shell: bash
         env:
-          REMOTE_NAME: ${{ inputs.remote_name }}
+          REMOTE_NAME: ${{ inputs.remote_name || 'gdrive' }}
         run: |
           set -euo pipefail
           python3 <<'PY'
@@ -295,7 +295,7 @@ jobs:
       - name: Share & Shorten Link
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && inputs.link_sharing == 'true' }}
         env:
-          REMOTE_NAME: ${{ inputs.remote_name }}
+          REMOTE_NAME: ${{ inputs.remote_name || 'gdrive' }}
           ZIP_MODE: ${{ inputs.zip_mode }}
         run: |
           set -e
