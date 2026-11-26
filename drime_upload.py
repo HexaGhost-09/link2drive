@@ -14,7 +14,7 @@ import requests
 API_BASE = "https://app.drime.cloud/api/v1"
 TOKEN = os.environ.get("DRIME_TOKEN", "").strip()
 SIMPLE_UPLOAD_LIMIT = 5 * 1024 * 1024
-CHUNK_SIZE = 50 * 1024 * 1024  # 50 MiB per multipart part
+CHUNK_SIZE = 100 * 1024 * 1024  # 100 MiB per multipart part
 WORKERS = 4
 WORKSPACE_ID = 0  # Drime personal workspace
 
