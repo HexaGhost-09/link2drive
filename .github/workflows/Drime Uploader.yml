@@ -1,0 +1,147 @@
+name: Drime Uploader
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Direct HTTP(S) URL or magnet link (leave blank to process links.txt)"
+        required: false
+        type: string
+      zip:
+        description: "Compress all downloaded files into one ZIP before uploading"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: link2drive-drime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Download and upload to Drime
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install aria2 and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2
+          python -m pip install --upgrade pip
+          python -m pip install requests
+
+      - name: Prepare input links
+        env:
+          SINGLE_URL: ${{ inputs.url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$SINGLE_URL" ]]; then
+            printf '%s\n' "$SINGLE_URL" > input.txt
+          elif [[ -f links.txt ]]; then
+            cp links.txt input.txt
+          else
+            : > input.txt
+          fi
+
+          if ! grep -qE '^[[:space:]]*[^#[:space:]]' input.txt; then
+            echo "No links to process."
+            exit 1
+          fi
+
+          echo "## Drime upload" >> "$GITHUB_STEP_SUMMARY"
+          echo "Input links prepared." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download with aria2
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p downloads
+          index=0
+          while IFS= read -r url || [[ -n "$url" ]]; do
+            url="$(printf '%s' "$url" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            [[ -z "$url" || "$url" == \#* ]] && continue
+            index=$((index + 1))
+            echo "Starting download $index"
+            args=(
+              --dir=downloads
+              --continue=true
+              --max-tries=5
+              --retry-wait=5
+              --connect-timeout=30
+              --timeout=60
+              --summary-interval=10
+              --console-log-level=notice
+              --file-allocation=none
+              --seed-time=0
+            )
+            if [[ "$url" == magnet:?* ]]; then
+              args+=(--bt-max-peers=80 --follow-torrent=mem)
+            else
+              args+=(--max-connection-per-server=16 --split=16
+                --min-split-size=1M --content-disposition-default-utf8=true
+                --auto-file-renaming=true)
+            fi
+            aria2c "${args[@]}" "$url"
+          done < input.txt
+
+          if ! find downloads -type f -print -quit | grep -q .; then
+            echo "No files were downloaded."
+            exit 1
+          fi
+
+      - name: Prepare ZIP (optional)
+        if: inputs.zip
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_STORED, ZipFile
+          import shutil
+
+          root = Path("downloads")
+          archive = Path("Downloads.zip")
+          files = [p for p in root.rglob("*") if p.is_file()]
+          with ZipFile(archive, "w", compression=ZIP_STORED) as zf:
+              for path in files:
+                  zf.write(path, path.relative_to(root))
+          shutil.rmtree(root)
+          root.mkdir()
+          shutil.move(str(archive), str(root / archive.name))
+          print(f"Created {archive.name} from {len(files)} downloaded file(s)")
+          PY
+
+      - name: Upload files to Drime
+        env:
+          DRIME_TOKEN: ${{ secrets.DRIME_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${DRIME_TOKEN:-}" ]]; then
+            echo "::error::Missing repository secret DRIME_TOKEN. Add your Drime API token in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          mapfile -d '' files < <(find downloads -type f -print0 | sort -z)
+          total="${#files[@]}"
+          if (( total == 0 )); then
+            echo "No files found to upload."
+            exit 1
+          fi
+
+          echo "Uploading $total file(s) to Drime..." >> "$GITHUB_STEP_SUMMARY"
+          for index in "${!files[@]}"; do
+            file="${files[$index]}"
+            echo "::group::Drime upload $((index + 1))/$total: $(basename "$file")"
+            python drime_upload.py "$file"
+            echo "::endgroup::"
+            echo "- Uploaded: $(basename "$file")" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "## Drime upload completed" >> "$GITHUB_STEP_SUMMARY"
+          echo "Successfully uploaded $total file(s)." >> "$GITHUB_STEP_SUMMARY"
