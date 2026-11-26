@@ -1,0 +1,5 @@
+downloads/
+upload/
+input.txt
+*.token
+ token.json
