@@ -109,7 +109,7 @@ def upload_file(service, path: Path, parent_id: str, share: bool) -> None:
     )
     response = None
     while response is None:
-        status, response = request.next_chunk()
+        status, response = request.next_chunk(num_retries=5)
         if status:
             print(f"Uploading {path.name}: {status.progress() * 100:.1f}%")
     print(f"Uploaded: {response.get('name')} ({response.get('size', '?')} bytes)")
