@@ -1,330 +1,83 @@
-name: Uploader V4
+name: Link2Drive
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - 'links.txt'
+    branches: [main]
+    paths: [links.txt]
   workflow_dispatch:
     inputs:
-      magnet_link:
-        description: 'Optional single magnet link or direct download URL. Leave blank to process links.txt.'
+      url:
+        description: "Direct HTTP(S) URL or magnet link (leave blank to process links.txt)"
         required: false
         type: string
+      zip:
+        description: "Compress all downloaded files into one ZIP"
+        required: false
+        default: false
+        type: boolean
+      share:
+        description: "Create anyone-with-link viewer links"
+        required: false
+        default: false
+        type: boolean
 
-      remote_name:
-        description: 'The name of the remote in your rclone.conf'
-        required: true
-        default: 'gdrive'
+permissions:
+  contents: read
 
-      zip_mode:
-        description: 'Upload Mode (single upload only; links.txt uploads as files)'
-        required: true
-        type: choice
-        default: normal
-        options:
-          - normal
-          - zip
-
-      link_sharing:
-        description: 'Generate a share link for the uploaded file/folder? (single upload only)'
-        required: true
-        type: choice
-        default: 'false'
-        options:
-          - 'false'
-          - 'true'
+concurrency:
+  group: link2drive-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   transfer:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install Dependencies
+      - name: Install aria2 and Python
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 zip jq curl python3
-          curl --fail --silent --show-error https://rclone.org/install.sh | sudo bash
-          rclone version
+          sudo apt-get install -y aria2
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
 
-      - name: Configure Google Drive
+      - name: Prepare input links
         env:
-          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
-        run: |
-          set -euo pipefail
-          if [ -z "$RCLONE_CONFIG" ]; then
-            echo "::error::Add the complete rclone.conf contents as the RCLONE_CONFIG repository secret."
-            exit 1
-          fi
-          umask 077
-          printf '%s\n' "$RCLONE_CONFIG" > ./rclone.conf
-          rclone --config ./rclone.conf listremotes
-
-      # Process only newly added lines on links.txt pushes to avoid repeating old downloads.
-      - name: Load Links from links.txt
-        id: link_input
+          SINGLE_URL: ${{ inputs.url }}
         shell: bash
-        env:
-          SINGLE_INPUT: ${{ inputs.magnet_link }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
             BEFORE="$(jq -r '.before' "$GITHUB_EVENT_PATH")"
-            if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-              git show "$GITHUB_SHA:links.txt" > /tmp/new-links.txt
+            if [[ "$BEFORE" == "0000000000000000000000000000000000000000" ]]; then
+              git show "$GITHUB_SHA:links.txt" > input.txt
             else
-              git diff --unified=0 "$BEFORE" "$GITHUB_SHA" -- links.txt | \
-                sed -n '/^+++ /d; /^+[^+]/s/^+//p' > /tmp/new-links.txt
+              git diff --unified=0 "$BEFORE" "$GITHUB_SHA" -- links.txt |
+                sed -n '/^+++ /d; /^+[^+]/s/^+//p' > input.txt
             fi
-          elif [ -n "$SINGLE_INPUT" ]; then
-            : > /tmp/new-links.txt
-          elif [ -f links.txt ]; then
-            cp links.txt /tmp/new-links.txt
+          elif [[ -n "$SINGLE_URL" ]]; then
+            printf '%s\n' "$SINGLE_URL" > input.txt
+          elif [[ -f links.txt ]]; then
+            cp links.txt input.txt
           else
-            : > /tmp/new-links.txt
+            : > input.txt
           fi
-          grep -vE '^[[:space:]]*(#|$)' /tmp/new-links.txt > /tmp/filtered-links.txt || true
-          mv /tmp/filtered-links.txt /tmp/new-links.txt
-
-      # Keep the original single magnet/direct-URL workflow intact.
-      - name: Download Single Item
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' }}
-        shell: bash
-        env:
-          INPUT: ${{ inputs.magnet_link }}
-        run: |
-          set -euo pipefail
-          if [ -z "$INPUT" ]; then
-            echo "::error::Provide a magnet/direct URL or use Multiple Links."
+          if ! grep -qE '^[[:space:]]*[^#[:space:]]' input.txt; then
+            echo "No links to process."
             exit 1
           fi
-          mkdir -p downloads
-          if [[ "$INPUT" == magnet:* ]]; then
-            echo "Detected Magnet Link"
-            aria2c --seed-time=0 --summary-interval=5 --dir=downloads \
-              --bt-max-peers=120 --file-allocation=falloc "$INPUT"
-          else
-            echo "Detected Direct URL"
-            FILENAME=$(python3 - "$INPUT" <<'PY'
-          import hashlib, re, sys
-          from urllib.parse import unquote, urlparse
-          url = sys.argv[1]
-          name = unquote(urlparse(url).path.rsplit('/', 1)[-1])
-          name = ''.join('_' if ord(ch) < 32 or ch in '/'+chr(92)+':*?"<>|' else ch for ch in name).strip(' .')
-          if not name or len(name.encode('utf-8')) > 180:
-              name = f"download-{hashlib.sha256(url.encode()).hexdigest()[:12]}.bin"
-          print(name)
-          PY
-          )
-            aria2c --dir=downloads --out="$FILENAME" --continue=true \
-              --auto-file-renaming=false --content-disposition-default-utf8=true "$INPUT"
-          fi
 
-          ENTRY_COUNT=$(find downloads -mindepth 1 -maxdepth 1 | wc -l)
-          if [ "$ENTRY_COUNT" -eq 1 ]; then
-            BASE_NAME=$(basename "$(find downloads -mindepth 1 -maxdepth 1)")
-          else
-            BASE_NAME="Downloads"
-          fi
-          if [ -f "downloads/$BASE_NAME" ]; then
-            NAME_NO_EXT="${BASE_NAME%.*}"
-          else
-            NAME_NO_EXT="$BASE_NAME"
-          fi
-          echo "UPLOAD_NAME=$NAME_NO_EXT" >> "$GITHUB_ENV"
-
-      - name: Show Downloaded Files
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' }}
-        run: |
-          echo "Downloaded files:"
-          ls -lah downloads
-          echo "Upload name will be: $UPLOAD_NAME"
-
-      - name: Compress Files (Optional)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && inputs.zip_mode == 'zip' }}
-        run: |
-          mkdir -p upload
-          zip -r "upload/${UPLOAD_NAME}.zip" downloads
-
-      - name: Prepare Normal Upload
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && inputs.zip_mode == 'normal' }}
-        run: |
-          mkdir -p upload
-          cp -r downloads/. upload/
-
-      - name: Upload Single Item via Rclone
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' }}
+      - name: Download and upload to Google Drive
         env:
-          REMOTE_NAME: ${{ inputs.remote_name || 'gdrive' }}
-        run: |
-          set -euo pipefail
-          rclone --config ./rclone.conf copy ./upload/ "$REMOTE_NAME:Downloads/" \
-            --progress --transfers 8 --checkers 16 --fast-list
-
-      # Multiple direct links: probe sizes, download in safe concurrent batches,
-      # upload each batch, then delete its local files before the next batch.
-      - name: Multiple Links — Smart Batch Download, Upload & Cleanup
-        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.magnet_link == '') }}
-        shell: bash
-        env:
-          REMOTE_NAME: ${{ inputs.remote_name || 'gdrive' }}
-        run: |
-          set -euo pipefail
-          python3 <<'PY'
-          import concurrent.futures
-          import hashlib
-          import os
-          import re
-          import shutil
-          import subprocess
-          import tempfile
-          import urllib.request
-          from pathlib import Path
-          from urllib.parse import unquote, urlparse
-
-          raw = Path("/tmp/new-links.txt").read_text(encoding="utf-8").replace("\\r", "")
-          urls = [line.strip() for line in raw.splitlines()
-                  if line.strip() and not line.lstrip().startswith("#")]
-          if not urls:
-              raise SystemExit("Paste at least one direct URL.")
-          print(f"Loaded {len(urls)} URL(s) from links.txt.")
-          for i, url in enumerate(urls, 1):
-              if urlparse(url).scheme not in ("http", "https"):
-                  raise SystemExit(f"Line {i} is not an HTTP/HTTPS URL.")
-
-          def probe(url):
-              headers = {"User-Agent": "Link2Drive-Uploader-V4"}
-              try:
-                  req = urllib.request.Request(url, method="HEAD", headers=headers)
-                  with urllib.request.urlopen(req, timeout=30) as response:
-                      value = response.headers.get("Content-Length")
-                      if value and value.isdigit():
-                          return int(value)
-              except Exception:
-                  pass
-              try:
-                  req = urllib.request.Request(url, headers={**headers, "Range": "bytes=0-0"})
-                  with urllib.request.urlopen(req, timeout=30) as response:
-                      match = re.search(r"/(\d+)$", response.headers.get("Content-Range", ""))
-                      if match:
-                          return int(match.group(1))
-                      value = response.headers.get("Content-Length")
-                      if response.status == 200 and value and value.isdigit():
-                          return int(value)
-              except Exception:
-                  pass
-              return None
-
-          items = []
-          for index, url in enumerate(urls, 1):
-              size = probe(url)
-              name = unquote(urlparse(url).path.rsplit("/", 1)[-1]) or f"download-{index}.bin"
-              name = ''.join('_' if ord(ch) < 32 or ch in '/'+chr(92)+':*?"<>|' else ch for ch in name).strip(" .") or f"download-{index}.bin"
-              if len(name.encode("utf-8")) > 180:
-                  name = f"download-{index}-{hashlib.sha256(url.encode()).hexdigest()[:10]}.bin"
-              items.append({"index": index, "url": url, "size": size, "name": f"{index:02d}-{name}"})
-              print(f"[{index}/{len(urls)}] {name}: " +
-                    (f"{size / 1_000_000:.1f} MB" if size is not None else "unknown size (solo batch)"))
-
-          # >3 GB: 1 at a time. >500 MB through 3 GB: 5 at a time.
-          # <=500 MB: 10 at a time. Unknown-size URLs: 1 at a time.
-          large = [x for x in items if x["size"] is not None and x["size"] > 3_000_000_000]
-          medium = [x for x in items if x["size"] is not None and 500_000_000 < x["size"] <= 3_000_000_000]
-          small = [x for x in items if x["size"] is not None and x["size"] <= 500_000_000]
-          unknown = [x for x in items if x["size"] is None]
-
-          batches = []
-          MAX_BATCH_BYTES = 8_000_000_000  # Keep staged batches within runner disk capacity.
-          for group, width in ((large, 1), (medium, 5), (small, 10), (unknown, 1)):
-              current = []
-              current_bytes = 0
-              for item in group:
-                  item_size = item["size"] or 0
-                  if current and (len(current) >= width or current_bytes + item_size > MAX_BATCH_BYTES):
-                      batches.append(current)
-                      current = []
-                      current_bytes = 0
-                  current.append(item)
-                  current_bytes += item_size
-              if current:
-                  batches.append(current)
-
-          remote = os.environ["REMOTE_NAME"]
-          if not remote or ":" in remote or "/" in remote:
-              raise SystemExit("Invalid rclone remote name.")
-          for batch_no, batch in enumerate(batches, 1):
-              batch_dir = Path(tempfile.mkdtemp(prefix=f"uploader-v4-batch-{batch_no}-"))
-              print(f"\n=== Batch {batch_no}/{len(batches)}: downloading {len(batch)} file(s) ===")
-              try:
-                  def download(item):
-                      target = batch_dir / item["name"]
-                      subprocess.run([
-                          "aria2c", "--dir", str(batch_dir), "--out", item["name"],
-                          "--continue=true", "--auto-file-renaming=false",
-                          "--content-disposition-default-utf8=true",
-                          "--summary-interval=5", item["url"]
-                      ], check=True)
-                      return target
-
-                  with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as pool:
-                      list(pool.map(download, batch))
-
-                  print(f"Uploading batch {batch_no} to {remote}:Downloads/ ...")
-                  subprocess.run([
-                      "rclone", "--config", "./rclone.conf", "copy", str(batch_dir),
-                      f"{remote}:Downloads/", "--progress", "--transfers", str(len(batch)),
-                      "--checkers", "16", "--fast-list"
-                  ], check=True)
-                  print(f"Batch {batch_no} uploaded successfully. Deleting local batch files.")
-              except Exception:
-                  print(f"Batch {batch_no} failed. Keeping its temporary files until runner cleanup.")
-                  raise
-              # rclone succeeded; free runner disk before starting the next batch.
-              shutil.rmtree(batch_dir)
-              print(f"Batch {batch_no} cleaned. Runner disk space released.")
-          print("\nAll multiple-link batches uploaded successfully.")
-          PY
-
-      - name: Share & Shorten Link
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.magnet_link != '' && inputs.link_sharing == 'true' }}
-        env:
-          REMOTE_NAME: ${{ inputs.remote_name || 'gdrive' }}
-          ZIP_MODE: ${{ inputs.zip_mode }}
-        run: |
-          set -e
-          if [ "$ZIP_MODE" == "zip" ]; then
-            TARGET_PATH="Downloads/${UPLOAD_NAME}.zip"
-          else
-            FILE_COUNT=$(find upload -maxdepth 1 -type f | wc -l)
-            if [ "$FILE_COUNT" -eq 1 ]; then
-              FILE_NAME=$(find upload -maxdepth 1 -type f -printf "%f\n")
-              TARGET_PATH="Downloads/$FILE_NAME"
-            else
-              TARGET_PATH="Downloads"
-            fi
-          fi
-          rclone --config ./rclone.conf link "$REMOTE_NAME:$TARGET_PATH" > gdrive_link.txt
-          FINAL_URL=$(cat gdrive_link.txt)
-          RESPONSE=$(curl -s -X POST https://api.shrinkrl.com/api/v1/urls \
-            -H "Content-Type: application/json" \
-            -d "{\\"url\\":{\\"original_url\\":\\"$FINAL_URL\\"}}")
-          SHORT_URL=$(echo "$RESPONSE" | jq -r '.short_url')
-          {
-            echo "### 🔗 Upload Links"
-            echo ""
-            echo "**Name:** $UPLOAD_NAME"
-            echo ""
-            echo "**Google Drive URL:** $FINAL_URL"
-            echo ""
-            echo "**Short URL:** $SHORT_URL"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Done
-        run: echo "Upload Complete!"
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          INPUT_FILE: input.txt
+          ZIP_MODE: ${{ inputs.zip }}
+          SHARE_LINKS: ${{ inputs.share }}
+        run: python uploader.py
